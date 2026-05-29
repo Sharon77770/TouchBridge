@@ -1,10 +1,10 @@
 use std::mem::size_of;
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
@@ -12,11 +12,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, FindWindowExW, GetCursorPos, GetMessageW, HWND_MESSAGE, IDI_APPLICATION,
-    LoadIconW, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_RBUTTONUP, WM_USER, WNDCLASSW,
+    DispatchMessageW, FindWindowExW, FindWindowW, GetCursorPos, GetMessageW, HWND_MESSAGE,
+    IDI_APPLICATION, LoadIconW, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSW,
 };
 use windows::core::{Error, PCWSTR, w};
 
@@ -39,6 +39,7 @@ struct TraySignals {
     language: AtomicU8,
     show_requested: AtomicBool,
     exit_requested: AtomicBool,
+    repaint_context: Mutex<Option<egui::Context>>,
 }
 
 static TRAY_SIGNALS: OnceLock<Arc<TraySignals>> = OnceLock::new();
@@ -50,6 +51,7 @@ impl TrayHandle {
             language: AtomicU8::new(language_to_u8(language)),
             show_requested: AtomicBool::new(false),
             exit_requested: AtomicBool::new(false),
+            repaint_context: Mutex::new(None),
         });
 
         let _ = TRAY_SIGNALS.set(signals.clone());
@@ -79,6 +81,14 @@ impl TrayHandle {
         self.signals
             .language
             .store(language_to_u8(language), Ordering::SeqCst);
+    }
+
+    pub fn set_repaint_context(&self, context: egui::Context) {
+        let Ok(mut repaint_context) = self.signals.repaint_context.lock() else {
+            return;
+        };
+
+        *repaint_context = Some(context);
     }
 }
 
@@ -279,7 +289,10 @@ fn tray_event(wparam: WPARAM, lparam: LPARAM) -> Option<u32> {
 fn request_show() {
     if let Some(signals) = TRAY_SIGNALS.get() {
         signals.show_requested.store(true, Ordering::SeqCst);
+        request_gui_repaint(signals);
     }
+
+    show_main_window();
 }
 
 fn set_available(available: bool) {
@@ -291,7 +304,43 @@ fn set_available(available: bool) {
 fn request_exit() {
     if let Some(signals) = TRAY_SIGNALS.get() {
         signals.exit_requested.store(true, Ordering::SeqCst);
+        request_gui_repaint(signals);
     }
+
+    close_main_window();
+}
+
+fn request_gui_repaint(signals: &TraySignals) {
+    let Ok(repaint_context) = signals.repaint_context.lock() else {
+        return;
+    };
+
+    if let Some(context) = repaint_context.as_ref() {
+        context.request_repaint();
+    }
+}
+
+fn show_main_window() {
+    let Some(hwnd) = main_window() else {
+        return;
+    };
+
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn close_main_window() {
+    let Some(hwnd) = main_window() else {
+        return;
+    };
+
+    let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+}
+
+fn main_window() -> Option<HWND> {
+    unsafe { FindWindowW(PCWSTR::null(), w!("TouchBridge Agent")) }.ok()
 }
 
 unsafe fn show_context_menu(hwnd: HWND) {

@@ -30,7 +30,14 @@ pub struct TouchBridgeGui {
 }
 
 impl TouchBridgeGui {
-    pub fn new(state: SharedAppState, config_path: PathBuf, tray: TrayHandle) -> Self {
+    pub fn new(
+        state: SharedAppState,
+        config_path: PathBuf,
+        tray: TrayHandle,
+        repaint_context: egui::Context,
+    ) -> Self {
+        tray.set_repaint_context(repaint_context);
+
         let (action_inputs, action_kinds) = {
             let state = state.read().expect("app state poisoned");
             let mut inputs = HashMap::new();
@@ -274,6 +281,7 @@ impl TouchBridgeGui {
 
 impl eframe::App for TouchBridgeGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tray.set_repaint_context(ctx.clone());
         self.configure_fonts(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
 

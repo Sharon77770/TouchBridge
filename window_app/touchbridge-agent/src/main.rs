@@ -50,7 +50,14 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "TouchBridge Agent",
         options,
-        Box::new(|_cc| Ok(Box::new(gui::TouchBridgeGui::new(state, config_path, tray)))),
+        Box::new(|cc| {
+            Ok(Box::new(gui::TouchBridgeGui::new(
+                state,
+                config_path,
+                tray,
+                cc.egui_ctx.clone(),
+            )))
+        }),
     )
 }
 
