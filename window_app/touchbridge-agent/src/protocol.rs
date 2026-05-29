@@ -1,0 +1,8 @@
+use windows::core::GUID;
+
+pub const SERVICE_UUID: GUID = GUID::from_u128(0x4f2b9d9c_39c1_4f35_8752_9f32fd325f61);
+pub const GESTURE_CHARACTERISTIC_UUID: GUID =
+    GUID::from_u128(0x8a7f1168_48af_4f0d_95ee_7d6701f34b46);
+
+pub const SERVICE_UUID_STRING: &str = "4f2b9d9c-39c1-4f35-8752-9f32fd325f61";
+pub const GESTURE_CHARACTERISTIC_UUID_STRING: &str = "8a7f1168-48af-4f0d-95ee-7d6701f34b46";

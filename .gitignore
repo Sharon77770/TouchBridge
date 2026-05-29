@@ -1,0 +1,35 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+
+# Environment and local secrets
+.env
+.env.*
+*.keystore
+*.jks
+*.p12
+*.pem
+
+# Android local/build files
+*.iml
+android_app/.gradle/
+android_app/.idea/
+android_app/.kotlin/
+android_app/local.properties
+android_app/captures/
+android_app/.externalNativeBuild/
+android_app/.cxx/
+android_app/**/build/
+android_app/**/.externalNativeBuild/
+android_app/**/.cxx/
+
+# Rust build output
+window_app/touchbridge-agent/target/
+window_app/touchbridge-agent/touchbridge-config.json
+
+# VS Code workspace-local files
+.vscode/
