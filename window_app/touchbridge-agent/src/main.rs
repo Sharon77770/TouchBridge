@@ -8,6 +8,7 @@ mod event;
 mod gui;
 mod i18n;
 mod input;
+mod instance;
 mod protocol;
 mod tray;
 mod usb;
@@ -20,6 +21,15 @@ use i18n::{ble_service_stopped, usb_service_stopped};
 
 fn main() -> eframe::Result<()> {
     println!("Starting TouchBridge Windows Agent BLE MVP");
+
+    let _single_instance = match instance::claim_or_show_existing() {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => return Ok(()),
+        Err(err) => {
+            eprintln!("Could not create single instance guard: {err}");
+            None
+        }
+    };
 
     let config_path = default_config_path();
     let config = AppConfig::load_or_default(&config_path);

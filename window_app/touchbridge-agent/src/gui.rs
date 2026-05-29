@@ -287,6 +287,7 @@ impl eframe::App for TouchBridgeGui {
 
         if self.tray.take_show_requested() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 

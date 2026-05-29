@@ -3,18 +3,20 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICON_VERSION_4,
-    NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetCursorPos, GetMessageW, HWND_MESSAGE, IDI_APPLICATION, LoadIconW, MF_STRING, MSG,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSW,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, FindWindowExW, GetCursorPos, GetMessageW, HWND_MESSAGE, IDI_APPLICATION,
+    LoadIconW, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+    TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_RBUTTONUP, WM_USER, WNDCLASSW,
 };
 use windows::core::{Error, PCWSTR, w};
 
@@ -22,6 +24,8 @@ use crate::i18n::{self, AppLanguage, TextKey};
 
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY_ICON: u32 = WM_USER + 1;
+const WM_SHOW_EXISTING_INSTANCE: u32 = WM_APP + 1;
+const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
 const MENU_SHOW_ID: usize = 1001;
 const MENU_EXIT_ID: usize = 1002;
 
@@ -76,6 +80,31 @@ impl TrayHandle {
             .language
             .store(language_to_u8(language), Ordering::SeqCst);
     }
+}
+
+pub fn request_existing_instance_show() -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    while Instant::now() < deadline {
+        if let Ok(hwnd) = unsafe {
+            FindWindowExW(
+                Some(HWND_MESSAGE),
+                None,
+                w!("TouchBridgeAgentTrayWindow"),
+                w!("TouchBridge Agent Tray"),
+            )
+        } {
+            if unsafe { PostMessageW(Some(hwnd), WM_SHOW_EXISTING_INSTANCE, WPARAM(0), LPARAM(0)) }
+                .is_ok()
+            {
+                return true;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    false
 }
 
 fn run_tray_loop() -> windows::core::Result<()> {
@@ -201,11 +230,15 @@ unsafe extern "system" fn tray_window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_SHOW_EXISTING_INSTANCE => {
+            request_show();
+            LRESULT(0)
+        }
         WM_TRAY_ICON => {
-            if wparam.0 as u32 == TRAY_ICON_ID {
-                match lparam.0 as u32 {
-                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => request_show(),
-                    WM_RBUTTONUP => unsafe {
+            if let Some(event) = tray_event(wparam, lparam) {
+                match event {
+                    WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT | NIN_KEYSELECT => request_show(),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => unsafe {
                         show_context_menu(hwnd);
                     },
                     _ => {}
@@ -229,6 +262,18 @@ unsafe extern "system" fn tray_window_proc(
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+fn tray_event(wparam: WPARAM, lparam: LPARAM) -> Option<u32> {
+    if wparam.0 as u32 == TRAY_ICON_ID {
+        return Some(lparam.0 as u32);
+    }
+
+    let lparam_value = lparam.0 as usize;
+    let event = (lparam_value & 0xffff) as u32;
+    let icon_id = ((lparam_value >> 16) & 0xffff) as u32;
+
+    (icon_id == TRAY_ICON_ID).then_some(event)
 }
 
 fn request_show() {
@@ -280,5 +325,6 @@ unsafe fn show_context_menu(hwnd: HWND) {
             hwnd,
             None,
         );
+        let _ = DestroyMenu(menu);
     }
 }
