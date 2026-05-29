@@ -285,6 +285,12 @@ impl eframe::App for TouchBridgeGui {
         self.configure_fonts(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
 
+        if self.tray.take_exit_requested() {
+            self.allow_exit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         if ctx.input(|input| input.viewport().close_requested())
             && !self.allow_exit
             && self.tray.is_available()
@@ -297,12 +303,6 @@ impl eframe::App for TouchBridgeGui {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-
-        if self.tray.take_exit_requested() {
-            self.allow_exit = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
         }
 
         self.reconcile_custom_button_inputs();

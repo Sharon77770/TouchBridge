@@ -14,9 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, FindWindowExW, FindWindowW, GetCursorPos, GetMessageW, HWND_MESSAGE,
     IDI_APPLICATION, LoadIconW, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSW,
+    SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_RBUTTONUP, WM_USER, WNDCLASSW,
 };
 use windows::core::{Error, PCWSTR, w};
 
@@ -365,15 +366,22 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     unsafe {
         let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(
+        let command = TrackPopupMenu(
             menu,
-            TPM_RIGHTBUTTON | TRACK_POPUP_MENU_FLAGS(0),
+            TPM_RIGHTBUTTON | TPM_RETURNCMD | TRACK_POPUP_MENU_FLAGS(0),
             point.x,
             point.y,
             None,
             hwnd,
             None,
         );
+
+        match command.0 as usize {
+            MENU_SHOW_ID => request_show(),
+            MENU_EXIT_ID => request_exit(),
+            _ => {}
+        }
+
         let _ = DestroyMenu(menu);
     }
 }
