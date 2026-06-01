@@ -2,18 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::i18n::AppLanguage;
 
-/// BLE GATT characteristic로 들어오는 JSON 이벤트를 Rust enum으로 표현합니다.
-///
-/// serde의 `tag = "type"` 옵션을 사용하면 아래 JSON의 `type` 값에 따라
-/// 자동으로 Move, Click, Scroll 중 하나로 역직렬화됩니다.
-///
-/// {"type":"move","dx":30,"dy":-10}
-/// {"type":"click","button":"left"}
-/// {"type":"scroll","dy":-120}
-/// {"type":"hotkey","name":"task_manager"}
-/// {"type":"gesture","name":"swipe_left"}
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Debug)]
 pub enum TouchEvent {
     Move {
         dx: i32,
@@ -25,73 +14,181 @@ pub enum TouchEvent {
     Scroll {
         dy: i32,
     },
-    Hotkey {
-        name: HotkeyName,
+    MouseDelta {
+        device_id: Option<String>,
+        dx: i32,
+        dy: i32,
+        dt: u32,
+        seq: u64,
+        timestamp: Option<u64>,
     },
-    Gesture {
-        name: Gesture,
+    KeyboardText {
+        device_id: Option<String>,
+        text: String,
+        seq: Option<u64>,
+        timestamp: Option<u64>,
     },
-    #[serde(rename = "gesture_event")]
+    KeyboardKey {
+        device_id: Option<String>,
+        key: KeyboardRemoteKey,
+        seq: Option<u64>,
+        timestamp: Option<u64>,
+    },
     GestureEvent {
-        #[serde(rename = "deviceId")]
-        device_id: String,
+        device_id: Option<String>,
         gesture: Gesture,
-        #[serde(rename = "profileId")]
         profile_id: Option<String>,
         timestamp: Option<u64>,
     },
-    #[serde(rename = "handshake")]
     Handshake {
-        #[serde(rename = "deviceId")]
         device_id: String,
         client: Option<String>,
-        #[serde(rename = "protocolVersion")]
         protocol_version: Option<u32>,
         timestamp: Option<u64>,
     },
-    #[serde(rename = "custom_button_sync")]
-    CustomButtonSync {
-        #[serde(rename = "deviceId")]
-        device_id: String,
-        buttons: Vec<CustomButtonDefinition>,
+    CustomButtonSyncBegin {
+        device_id: Option<String>,
+    },
+    CustomButtonSyncItem {
+        device_id: Option<String>,
+        button: CustomButtonDefinition,
+    },
+    CustomButtonSyncEnd {
+        device_id: Option<String>,
+    },
+    CustomButtonEvent {
+        device_id: Option<String>,
+        button_id: String,
         timestamp: Option<u64>,
     },
-    #[serde(rename = "custom_button_event")]
-    CustomButtonEvent {
-        #[serde(rename = "deviceId")]
-        device_id: String,
-        #[serde(rename = "buttonId")]
-        button_id: String,
+    MouseButtonEvent {
+        device_id: Option<String>,
+        button: MouseButton,
+        action: MouseButtonAction,
         timestamp: Option<u64>,
     },
 }
 
-/// 현재 MVP에서는 왼쪽/오른쪽 클릭만 지원합니다.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug)]
 pub enum MouseButton {
     Left,
     Right,
 }
 
-/// 로컬 PC에서 실행할 미리 정해진 단축키입니다.
-///
-/// MVP에서는 임의 키 조합을 모두 허용하지 않고, 안전하게 테스트할 수 있는
-/// 작업 관리자 단축키만 먼저 노출합니다.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HotkeyName {
-    TaskManager,
+#[derive(Debug)]
+pub enum MouseButtonAction {
+    Down,
+    Up,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
+pub enum KeyboardRemoteKey {
+    Backspace,
+    Enter,
+}
+
+#[derive(Clone, Debug)]
 pub struct CustomButtonDefinition {
     pub id: String,
     pub label: String,
     pub position: Option<usize>,
 }
 
+pub fn parse_compact_event(raw: &str) -> std::result::Result<TouchEvent, String> {
+    let fields = raw.trim().split(':').collect::<Vec<_>>();
+    let command = fields.first().copied().unwrap_or_default();
+
+    match command {
+        "H" => {
+            let device_id = decode_compact_field(require_field(&fields, 1, "device id")?)?;
+            Ok(TouchEvent::Handshake {
+                device_id,
+                client: Some("android".to_string()),
+                protocol_version: Some(2),
+                timestamp: None,
+            })
+        }
+        "G" => Ok(TouchEvent::GestureEvent {
+            device_id: None,
+            gesture: parse_gesture(require_field(&fields, 1, "gesture")?)?,
+            profile_id: None,
+            timestamp: None,
+        }),
+        "M" => Ok(TouchEvent::Move {
+            dx: parse_compact_i32(require_field(&fields, 1, "dx")?)?,
+            dy: parse_compact_i32(require_field(&fields, 2, "dy")?)?,
+        }),
+        "D" => Ok(TouchEvent::MouseDelta {
+            device_id: None,
+            seq: parse_compact_u64(require_field(&fields, 1, "seq")?)?,
+            dx: parse_compact_i32(require_field(&fields, 2, "dx")?)?,
+            dy: parse_compact_i32(require_field(&fields, 3, "dy")?)?,
+            dt: parse_compact_u32(require_field(&fields, 4, "dt")?)?,
+            timestamp: None,
+        }),
+        "S" => Ok(TouchEvent::Scroll {
+            dy: parse_compact_i32(require_field(&fields, 1, "dy")?)?,
+        }),
+        "C" => Ok(TouchEvent::Click {
+            button: parse_mouse_button(require_field(&fields, 1, "button")?)?,
+        }),
+        "B" => Ok(TouchEvent::MouseButtonEvent {
+            device_id: None,
+            button: parse_mouse_button(require_field(&fields, 1, "button")?)?,
+            action: parse_mouse_button_action(require_field(&fields, 2, "action")?)?,
+            timestamp: None,
+        }),
+        "T" => Ok(TouchEvent::KeyboardText {
+            device_id: None,
+            seq: Some(parse_compact_u64(require_field(&fields, 1, "seq")?)?),
+            text: decode_hex_utf8(require_field(&fields, 2, "text")?)?,
+            timestamp: None,
+        }),
+        "K" => Ok(TouchEvent::KeyboardKey {
+            device_id: None,
+            seq: Some(parse_compact_u64(require_field(&fields, 1, "seq")?)?),
+            key: parse_keyboard_key(require_field(&fields, 2, "key")?)?,
+            timestamp: None,
+        }),
+        "Y" => Ok(TouchEvent::CustomButtonEvent {
+            device_id: None,
+            button_id: decode_compact_field(require_field(&fields, 1, "button id")?)?,
+            timestamp: None,
+        }),
+        "Q" => parse_custom_button_sync(&fields),
+        _ => Err(format!("unknown compact command: {command}")),
+    }
+}
+
+pub fn encode_compact_field(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.as_bytes() {
+        let char = *byte as char;
+        if char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.') {
+            encoded.push(char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX_DIGITS[(byte >> 4) as usize]);
+            encoded.push(HEX_DIGITS[(byte & 0x0F) as usize]);
+        }
+    }
+
+    encoded
+}
+
 impl TouchEvent {
+    pub fn is_realtime_input(&self) -> bool {
+        matches!(
+            self,
+            TouchEvent::Move { .. }
+                | TouchEvent::Scroll { .. }
+                | TouchEvent::MouseDelta { .. }
+                | TouchEvent::KeyboardText { .. }
+                | TouchEvent::KeyboardKey { .. }
+        )
+    }
+
     pub fn summary(&self) -> String {
         match self {
             TouchEvent::Move { dx, dy } => format!("move dx={dx}, dy={dy}"),
@@ -100,22 +197,58 @@ impl TouchEvent {
                 MouseButton::Right => "click button=right".to_string(),
             },
             TouchEvent::Scroll { dy } => format!("scroll dy={dy}"),
-            TouchEvent::Hotkey { name } => match name {
-                HotkeyName::TaskManager => "hotkey name=task_manager -> Ctrl+Shift+Esc".to_string(),
-            },
-            TouchEvent::Gesture { name } => format!("gesture name={}", name.event_name()),
+            TouchEvent::MouseDelta {
+                device_id,
+                dx,
+                dy,
+                dt,
+                seq,
+                timestamp,
+            } => format!(
+                "mouse_delta device_id={}, dx={dx}, dy={dy}, dt={dt}, seq={seq}, timestamp={}",
+                device_id.as_deref().unwrap_or("unknown"),
+                optional_u64(timestamp)
+            ),
+            TouchEvent::KeyboardText {
+                device_id,
+                text,
+                seq,
+                timestamp,
+            } => format!(
+                "keyboard_text device_id={}, chars={}, seq={}, timestamp={}",
+                device_id.as_deref().unwrap_or("unknown"),
+                text.chars().count(),
+                optional_u64(seq),
+                optional_u64(timestamp)
+            ),
+            TouchEvent::KeyboardKey {
+                device_id,
+                key,
+                seq,
+                timestamp,
+            } => {
+                let key = match key {
+                    KeyboardRemoteKey::Backspace => "backspace",
+                    KeyboardRemoteKey::Enter => "enter",
+                };
+                format!(
+                    "keyboard_key device_id={}, key={key}, seq={}, timestamp={}",
+                    device_id.as_deref().unwrap_or("unknown"),
+                    optional_u64(seq),
+                    optional_u64(timestamp)
+                )
+            }
             TouchEvent::GestureEvent {
                 device_id,
                 gesture,
                 profile_id,
                 timestamp,
             } => format!(
-                "gesture_event device_id={device_id}, gesture={}, profile_id={}, timestamp={}",
+                "gesture_event device_id={}, gesture={}, profile_id={}, timestamp={}",
+                device_id.as_deref().unwrap_or("unknown"),
                 gesture.event_name(),
                 profile_id.as_deref().unwrap_or("default"),
-                timestamp
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string())
+                optional_u64(timestamp)
             ),
             TouchEvent::Handshake {
                 device_id,
@@ -128,36 +261,63 @@ impl TouchEvent {
                 protocol_version
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
-                timestamp
+                optional_u64(timestamp)
+            ),
+            TouchEvent::CustomButtonSyncBegin { device_id } => {
+                format!(
+                    "custom_button_sync_begin device_id={}",
+                    device_id.as_deref().unwrap_or("unknown")
+                )
+            }
+            TouchEvent::CustomButtonSyncItem { device_id, button } => format!(
+                "custom_button_sync_item device_id={}, id={}, label={}, position={}",
+                device_id.as_deref().unwrap_or("unknown"),
+                button.id,
+                button.label,
+                button
+                    .position
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string())
             ),
-            TouchEvent::CustomButtonSync {
-                device_id,
-                buttons,
-                timestamp,
-            } => format!(
-                "custom_button_sync device_id={device_id}, buttons={}, timestamp={}",
-                buttons.len(),
-                timestamp
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            ),
+            TouchEvent::CustomButtonSyncEnd { device_id } => {
+                format!(
+                    "custom_button_sync_end device_id={}",
+                    device_id.as_deref().unwrap_or("unknown")
+                )
+            }
             TouchEvent::CustomButtonEvent {
                 device_id,
                 button_id,
                 timestamp,
             } => format!(
-                "custom_button_event device_id={device_id}, button_id={button_id}, timestamp={}",
-                timestamp
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string())
+                "custom_button_event device_id={}, button_id={button_id}, timestamp={}",
+                device_id.as_deref().unwrap_or("unknown"),
+                optional_u64(timestamp)
             ),
+            TouchEvent::MouseButtonEvent {
+                device_id,
+                button,
+                action,
+                timestamp,
+            } => {
+                let button = match button {
+                    MouseButton::Left => "left",
+                    MouseButton::Right => "right",
+                };
+                let action = match action {
+                    MouseButtonAction::Down => "down",
+                    MouseButtonAction::Up => "up",
+                };
+                format!(
+                    "mouse_button_event device_id={}, button={button}, action={action}, timestamp={}",
+                    device_id.as_deref().unwrap_or("unknown"),
+                    optional_u64(timestamp)
+                )
+            }
         }
     }
 }
 
-/// MVP에서 GUI에 노출할 제스처 목록입니다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Gesture {
@@ -283,3 +443,156 @@ impl Gesture {
         }
     }
 }
+
+fn parse_custom_button_sync(fields: &[&str]) -> std::result::Result<TouchEvent, String> {
+    match require_field(fields, 1, "custom sync command")? {
+        "B" => Ok(TouchEvent::CustomButtonSyncBegin { device_id: None }),
+        "E" => Ok(TouchEvent::CustomButtonSyncEnd { device_id: None }),
+        "I" => Ok(TouchEvent::CustomButtonSyncItem {
+            device_id: None,
+            button: CustomButtonDefinition {
+                position: Some(parse_compact_usize(require_field(fields, 2, "position")?)?),
+                id: decode_compact_field(require_field(fields, 3, "button id")?)?,
+                label: decode_compact_field(require_field(fields, 4, "button label")?)?,
+            },
+        }),
+        other => Err(format!("unknown custom sync command: {other}")),
+    }
+}
+
+fn parse_gesture(value: &str) -> std::result::Result<Gesture, String> {
+    match value {
+        "0" => Ok(Gesture::Tap),
+        "1" => Ok(Gesture::DoubleTap),
+        "2" => Ok(Gesture::LongPress),
+        "3" => Ok(Gesture::SwipeUp),
+        "4" => Ok(Gesture::SwipeDown),
+        "5" => Ok(Gesture::SwipeLeft),
+        "6" => Ok(Gesture::SwipeRight),
+        "7" => Ok(Gesture::TwoFingerTap),
+        "8" => Ok(Gesture::TwoFingerSwipeLeft),
+        "9" => Ok(Gesture::TwoFingerSwipeRight),
+        "a" | "A" => Ok(Gesture::ThreeFingerTap),
+        _ => Err(format!("unknown gesture code: {value}")),
+    }
+}
+
+fn parse_mouse_button(value: &str) -> std::result::Result<MouseButton, String> {
+    match value {
+        "L" | "l" => Ok(MouseButton::Left),
+        "R" | "r" => Ok(MouseButton::Right),
+        _ => Err(format!("unknown mouse button: {value}")),
+    }
+}
+
+fn parse_mouse_button_action(value: &str) -> std::result::Result<MouseButtonAction, String> {
+    match value {
+        "D" | "d" => Ok(MouseButtonAction::Down),
+        "U" | "u" => Ok(MouseButtonAction::Up),
+        _ => Err(format!("unknown mouse button action: {value}")),
+    }
+}
+
+fn parse_keyboard_key(value: &str) -> std::result::Result<KeyboardRemoteKey, String> {
+    match value {
+        "B" | "b" => Ok(KeyboardRemoteKey::Backspace),
+        "E" | "e" => Ok(KeyboardRemoteKey::Enter),
+        _ => Err(format!("unknown keyboard key: {value}")),
+    }
+}
+
+fn require_field<'a>(
+    fields: &'a [&str],
+    index: usize,
+    label: &str,
+) -> std::result::Result<&'a str, String> {
+    fields
+        .get(index)
+        .copied()
+        .filter(|field| !field.is_empty())
+        .ok_or_else(|| format!("missing compact field: {label}"))
+}
+
+fn parse_compact_i32(value: &str) -> std::result::Result<i32, String> {
+    if let Some(digits) = value.strip_prefix('-') {
+        let parsed = i32::from_str_radix(digits, 36)
+            .map_err(|err| format!("invalid compact integer {value}: {err}"))?;
+        Ok(-parsed)
+    } else {
+        i32::from_str_radix(value, 36)
+            .map_err(|err| format!("invalid compact integer {value}: {err}"))
+    }
+}
+
+fn parse_compact_u32(value: &str) -> std::result::Result<u32, String> {
+    u32::from_str_radix(value, 36)
+        .map_err(|err| format!("invalid compact unsigned integer {value}: {err}"))
+}
+
+fn parse_compact_u64(value: &str) -> std::result::Result<u64, String> {
+    u64::from_str_radix(value, 36)
+        .map_err(|err| format!("invalid compact unsigned integer {value}: {err}"))
+}
+
+fn parse_compact_usize(value: &str) -> std::result::Result<usize, String> {
+    usize::from_str_radix(value, 36)
+        .map_err(|err| format!("invalid compact position {value}: {err}"))
+}
+
+fn decode_hex_utf8(value: &str) -> std::result::Result<String, String> {
+    if value.len() % 2 != 0 {
+        return Err("hex text has odd length".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let chars = value.as_bytes();
+    for index in (0..chars.len()).step_by(2) {
+        let high = hex_value(chars[index]).ok_or_else(|| "invalid hex text".to_string())?;
+        let low = hex_value(chars[index + 1]).ok_or_else(|| "invalid hex text".to_string())?;
+        bytes.push((high << 4) | low);
+    }
+
+    String::from_utf8(bytes).map_err(|err| format!("invalid utf-8 text: {err}"))
+}
+
+fn decode_compact_field(value: &str) -> std::result::Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(decoded).map_err(|err| format!("invalid compact field utf-8: {err}"))
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn optional_u64(value: &Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+const HEX_DIGITS: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+];

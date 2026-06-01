@@ -38,7 +38,15 @@
     <string name="gesture_vibration">Gesture vibration</string>
     <string name="gesture_vibration_body">Vibrate the phone when a gesture is sent successfully.</string>
     <string name="custom_buttons">Custom buttons</string>
+    <string name="buttons_tab">Buttons</string>
     <string name="custom_buttons_short">Buttons</string>
+    <string name="gesture_pad">Gesture pad</string>
+    <string name="mouse_pad">Mouse pad</string>
+    <string name="keyboard_remote">Keyboard</string>
+    <string name="keyboard_remote_input">Input</string>
+    <string name="mouse_sensitivity">Sensitivity</string>
+    <string name="mouse_left_click">Left click</string>
+    <string name="mouse_right_click">Right click</string>
     <string name="touch_pad_short">Pad</string>
     <string name="custom_buttons_body">Send named custom button signals to the connected Windows Agent.</string>
     <string name="empty_custom_buttons">No custom buttons yet.</string>
@@ -70,7 +78,7 @@
     <string name="gesture_pad_connected_subtitle">Connected as a phone gesture controller</string>
     <string name="connected_via_ble">Connected over BLE</string>
     <string name="connected_via_usb">Connected over USB</string>
-    <string name="touch_pad">Touch pad</string>
+    <string name="touch_pad">Gesture pad</string>
     <string name="current_profile">Current profile</string>
     <string name="default_profile">Default gestures</string>
     <string name="last_executed_gesture">Last gesture</string>

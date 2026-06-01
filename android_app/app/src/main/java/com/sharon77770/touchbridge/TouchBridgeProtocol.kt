@@ -1,9 +1,7 @@
 package com.sharon77770.touchbridge
 
-import org.json.JSONObject
-import org.json.JSONArray
-
 private const val DEFAULT_PROFILE_ID = "default"
+private const val COMPACT_MIN_ATT_PAYLOAD_BYTES = 20
 
 data class GestureEvent(
     val deviceId: String,
@@ -17,73 +15,251 @@ data class ProtocolAck(
     val message: String,
 )
 
-fun GestureEvent.toProtocolJson(): String {
-    return JSONObject()
-        .put("type", "gesture_event")
-        .put("deviceId", deviceId)
-        .put("gesture", gesture.wireName)
-        .put("profileId", profileId)
-        .put("timestamp", timestamp)
-        .toString()
+sealed class MousePadEvent {
+    data class Move(val dx: Int, val dy: Int) : MousePadEvent()
+    data class MouseDelta(
+        val dx: Int,
+        val dy: Int,
+        val dt: Int,
+        val seq: Long,
+    ) : MousePadEvent()
+    data class Scroll(val dy: Int) : MousePadEvent()
+    data class Click(val button: TouchBridgeMouseButton) : MousePadEvent()
+    data class Button(
+        val button: TouchBridgeMouseButton,
+        val action: TouchBridgeMouseButtonAction,
+    ) : MousePadEvent()
 }
 
-fun customButtonSyncJson(
-    deviceId: String,
-    buttons: List<CustomButton>,
-): String {
-    val buttonArray = JSONArray()
-    buttons.normalizedCustomButtonPositions().forEach { button ->
-        buttonArray.put(
-            JSONObject()
-                .put("id", button.id)
-                .put("label", button.label)
-                .put("position", button.position),
-        )
+sealed class KeyboardRemoteEvent {
+    data class TextInput(
+        val text: String,
+        val seq: Long,
+    ) : KeyboardRemoteEvent()
+
+    data class KeyPress(
+        val key: TouchBridgeKeyboardKey,
+        val seq: Long,
+    ) : KeyboardRemoteEvent()
+}
+
+enum class TouchBridgeMouseButton(val wireName: String) {
+    Left("left"),
+    Right("right"),
+}
+
+enum class TouchBridgeMouseButtonAction(val wireName: String) {
+    Down("down"),
+    Up("up"),
+}
+
+enum class TouchBridgeKeyboardKey(val wireName: String) {
+    Backspace("backspace"),
+    Enter("enter"),
+}
+
+fun GestureEvent.toProtocolMessage(): String {
+    return "G:${gesture.compactCode()}"
+}
+
+fun customButtonSyncMessages(buttons: List<CustomButton>): List<String> {
+    val normalized = buttons.normalizedCustomButtonPositions()
+    return buildList {
+        add("Q:B")
+        normalized.forEach { button ->
+            add(
+                "Q:I:${button.position.toCompactString()}:" +
+                    "${compactField(button.id)}:${compactField(button.label)}",
+            )
+        }
+        add("Q:E")
     }
-
-    return JSONObject()
-        .put("type", "custom_button_sync")
-        .put("deviceId", deviceId)
-        .put("buttons", buttonArray)
-        .put("timestamp", System.currentTimeMillis())
-        .toString()
 }
 
-fun customButtonEventJson(
-    deviceId: String,
-    buttonId: String,
-): String {
-    return JSONObject()
-        .put("type", "custom_button_event")
-        .put("deviceId", deviceId)
-        .put("buttonId", buttonId)
-        .put("timestamp", System.currentTimeMillis())
-        .toString()
+fun customButtonEventMessage(buttonId: String): String {
+    return "Y:${compactField(buttonId)}"
 }
 
-fun handshakeJson(deviceId: String): String {
-    return JSONObject()
-        .put("type", "handshake")
-        .put("deviceId", deviceId)
-        .put("client", "android")
-        .put("protocolVersion", 1)
-        .put("timestamp", System.currentTimeMillis())
-        .toString()
+fun MousePadEvent.toProtocolMessages(): List<String> {
+    return listOf(
+        when (this) {
+            is MousePadEvent.Move -> "M:${dx.toCompactString()}:${dy.toCompactString()}"
+            is MousePadEvent.MouseDelta -> "D:${seq.toCompactString()}:" +
+                "${dx.toCompactString()}:${dy.toCompactString()}:${dt.toCompactString()}"
+            is MousePadEvent.Scroll -> "S:${dy.toCompactString()}"
+            is MousePadEvent.Click -> "C:${button.compactCode()}"
+            is MousePadEvent.Button -> "B:${button.compactCode()}:${action.compactCode()}"
+        },
+    )
+}
+
+fun KeyboardRemoteEvent.toProtocolMessages(): List<String> {
+    return when (this) {
+        is KeyboardRemoteEvent.TextInput -> compactKeyboardTextMessages(seq, text)
+        is KeyboardRemoteEvent.KeyPress -> listOf("K:${seq.toCompactString()}:${key.compactCode()}")
+    }
+}
+
+fun handshakeMessage(deviceId: String): String {
+    return "H:${compactField(deviceId)}"
 }
 
 fun parseProtocolAck(raw: String): ProtocolAck {
-    val json = JSONObject(raw)
-    val type = json.optString("type")
+    val trimmed = raw.trim()
+    return when {
+        trimmed == "A1" -> ProtocolAck(ok = true, message = "executed")
+        trimmed.startsWith("A1:") -> {
+            ProtocolAck(ok = true, message = parseCompactField(trimmed.substringAfter(':')))
+        }
+        trimmed == "A0" -> ProtocolAck(ok = false, message = "")
+        trimmed.startsWith("A0:") -> {
+            ProtocolAck(ok = false, message = parseCompactField(trimmed.substringAfter(':')))
+        }
+        else -> ProtocolAck(ok = false, message = "Unexpected response: $trimmed")
+    }
+}
 
-    if (type != "ack") {
-        return ProtocolAck(
-            ok = false,
-            message = "Unexpected response type: ${type.ifBlank { "unknown" }}",
-        )
+private fun compactKeyboardTextMessages(seq: Long, text: String): List<String> {
+    if (text.isEmpty()) {
+        return emptyList()
     }
 
-    return ProtocolAck(
-        ok = json.optBoolean("ok", false),
-        message = json.optString("message", ""),
-    )
+    val seqPart = seq.toCompactString()
+    val prefix = "T:$seqPart:"
+    val maxBytes = ((COMPACT_MIN_ATT_PAYLOAD_BYTES - prefix.length) / 2)
+        .coerceAtLeast(4)
+    val messages = mutableListOf<String>()
+    val current = ArrayList<Byte>(maxBytes)
+    var index = 0
+
+    fun flush() {
+        if (current.isEmpty()) {
+            return
+        }
+
+        messages += prefix + current.toByteArray().toHex()
+        current.clear()
+    }
+
+    while (index < text.length) {
+        val codePoint = text.codePointAt(index)
+        val chunk = String(Character.toChars(codePoint)).encodeToByteArray()
+
+        if (current.isNotEmpty() && current.size + chunk.size > maxBytes) {
+            flush()
+        }
+
+        current.addAll(chunk.toList())
+        index += Character.charCount(codePoint)
+    }
+
+    flush()
+    return messages
 }
+
+private fun TouchBridgeGesture.compactCode(): String {
+    return when (this) {
+        TouchBridgeGesture.Tap -> "0"
+        TouchBridgeGesture.DoubleTap -> "1"
+        TouchBridgeGesture.LongPress -> "2"
+        TouchBridgeGesture.SwipeUp -> "3"
+        TouchBridgeGesture.SwipeDown -> "4"
+        TouchBridgeGesture.SwipeLeft -> "5"
+        TouchBridgeGesture.SwipeRight -> "6"
+        TouchBridgeGesture.TwoFingerTap -> "7"
+        TouchBridgeGesture.TwoFingerSwipeLeft -> "8"
+        TouchBridgeGesture.TwoFingerSwipeRight -> "9"
+        TouchBridgeGesture.ThreeFingerTap -> "a"
+    }
+}
+
+private fun TouchBridgeMouseButton.compactCode(): String {
+    return when (this) {
+        TouchBridgeMouseButton.Left -> "L"
+        TouchBridgeMouseButton.Right -> "R"
+    }
+}
+
+private fun TouchBridgeMouseButtonAction.compactCode(): String {
+    return when (this) {
+        TouchBridgeMouseButtonAction.Down -> "D"
+        TouchBridgeMouseButtonAction.Up -> "U"
+    }
+}
+
+private fun TouchBridgeKeyboardKey.compactCode(): String {
+    return when (this) {
+        TouchBridgeKeyboardKey.Backspace -> "B"
+        TouchBridgeKeyboardKey.Enter -> "E"
+    }
+}
+
+private fun Int.toCompactString(): String = toString(36)
+
+private fun Long.toCompactString(): String = toString(36)
+
+private fun compactField(value: String): String {
+    val builder = StringBuilder(value.length)
+    value.encodeToByteArray().forEach { rawByte ->
+        val byte = rawByte.toInt() and 0xFF
+        val char = byte.toChar()
+        if (
+            char in 'a'..'z' ||
+            char in 'A'..'Z' ||
+            char in '0'..'9' ||
+            char == '-' ||
+            char == '_' ||
+            char == '.'
+        ) {
+            builder.append(char)
+        } else {
+            builder.append('%')
+            builder.append(HEX_DIGITS[byte ushr 4])
+            builder.append(HEX_DIGITS[byte and 0x0F])
+        }
+    }
+    return builder.toString()
+}
+
+private fun parseCompactField(value: String): String {
+    val bytes = ArrayList<Byte>(value.length)
+    var index = 0
+
+    while (index < value.length) {
+        if (value[index] == '%' && index + 2 < value.length) {
+            val high = value[index + 1].hexValueOrNull()
+            val low = value[index + 2].hexValueOrNull()
+            if (high != null && low != null) {
+                bytes += ((high shl 4) or low).toByte()
+                index += 3
+                continue
+            }
+        }
+
+        bytes += value[index].code.toByte()
+        index++
+    }
+
+    return bytes.toByteArray().decodeToString()
+}
+
+private fun ByteArray.toHex(): String {
+    val builder = StringBuilder(size * 2)
+    forEach { rawByte ->
+        val byte = rawByte.toInt() and 0xFF
+        builder.append(HEX_DIGITS[byte ushr 4])
+        builder.append(HEX_DIGITS[byte and 0x0F])
+    }
+    return builder.toString()
+}
+
+private fun Char.hexValueOrNull(): Int? {
+    return when (this) {
+        in '0'..'9' -> code - '0'.code
+        in 'a'..'f' -> code - 'a'.code + 10
+        in 'A'..'F' -> code - 'A'.code + 10
+        else -> null
+    }
+}
+
+private val HEX_DIGITS = "0123456789ABCDEF".toCharArray()

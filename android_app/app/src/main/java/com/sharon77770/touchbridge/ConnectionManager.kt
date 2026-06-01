@@ -43,17 +43,29 @@ class ConnectionManager(
     suspend fun syncCustomButtons(buttons: List<CustomButton>): Result<ProtocolAck> {
         val transport = activeTransport
             ?: return Result.failure(IOException("No active TouchBridge connection"))
-        val deviceId = activeDevice?.id ?: "android-touchbridge"
 
-        return transport.sendRawMessage(customButtonSyncJson(deviceId, buttons))
+        return transport.sendProtocolMessages(customButtonSyncMessages(buttons))
     }
 
     suspend fun sendCustomButtonEvent(buttonId: String): Result<ProtocolAck> {
         val transport = activeTransport
             ?: return Result.failure(IOException("No active TouchBridge connection"))
-        val deviceId = activeDevice?.id ?: "android-touchbridge"
 
-        return transport.sendRawMessage(customButtonEventJson(deviceId, buttonId))
+        return transport.sendRawMessage(customButtonEventMessage(buttonId))
+    }
+
+    suspend fun sendMousePadEvent(event: MousePadEvent): Result<ProtocolAck> {
+        val transport = activeTransport
+            ?: return Result.failure(IOException("No active TouchBridge connection"))
+
+        return transport.sendProtocolMessages(event.toProtocolMessages())
+    }
+
+    suspend fun sendKeyboardRemoteEvent(event: KeyboardRemoteEvent): Result<ProtocolAck> {
+        val transport = activeTransport
+            ?: return Result.failure(IOException("No active TouchBridge connection"))
+
+        return transport.sendProtocolMessages(event.toProtocolMessages())
     }
 
     fun disconnect() {
@@ -92,7 +104,7 @@ class BleTransport(
     }
 
     override suspend fun sendGestureEvent(event: GestureEvent): Result<ProtocolAck> {
-        return sendRawMessage(event.toProtocolJson())
+        return sendRawMessage(event.toProtocolMessage())
     }
 
     override suspend fun sendRawMessage(raw: String): Result<ProtocolAck> {
@@ -104,4 +116,20 @@ class BleTransport(
     override fun disconnect() {
         client.close()
     }
+}
+
+private suspend fun ConnectionTransport.sendProtocolMessages(
+    messages: List<String>,
+): Result<ProtocolAck> {
+    var lastAck = ProtocolAck(ok = true, message = "executed")
+
+    for (message in messages) {
+        val result = sendRawMessage(message)
+        if (result.isFailure) {
+            return result
+        }
+        lastAck = result.getOrThrow()
+    }
+
+    return Result.success(lastAck)
 }

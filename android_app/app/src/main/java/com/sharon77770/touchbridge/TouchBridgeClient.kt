@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import java.io.IOException
@@ -34,14 +35,20 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-const val TOUCHBRIDGE_ANDROID_CLIENT_BUILD = "ble-gatt-2026-05-29-02"
+const val TOUCHBRIDGE_ANDROID_CLIENT_BUILD = "ble-compact-low-latency-keyboard-fix-2026-06-02-01"
 
 private const val TAG = "TouchBridgeClient"
 private const val SCAN_TIMEOUT_MS = 12_000L
 private const val CONNECT_TIMEOUT_MS = 8_000L
-private const val WRITE_TIMEOUT_MS = 4_000L
+private const val WRITE_TIMEOUT_MS = 5_000L
 private const val SERVICE_DISCOVERY_DELAY_MS = 500L
 private const val GATT_CACHE_RETRY_DELAY_MS = 650L
+private const val DEFAULT_ATT_MTU = 23
+private const val PREFERRED_ATT_MTU = 247
+private const val ATT_HEADER_BYTES = 3
+private const val NO_RESPONSE_WRITE_SPACING_MS = 4L
+private const val NO_RESPONSE_WRITE_RETRY_DELAY_MS = 2L
+private const val NO_RESPONSE_WRITE_MAX_ATTEMPTS = 3
 
 private val SERVICE_UUID: UUID = UUID.fromString("4f2b9d9c-39c1-4f35-8752-9f32fd325f61")
 private val GESTURE_CHARACTERISTIC_UUID: UUID =
@@ -54,6 +61,7 @@ open class TouchBridgeClient(
     private val sendMutex = Mutex()
     private var activeConnection: ActiveConnection? = null
     private var pendingWrite: CompletableDeferred<Int>? = null
+    private var nextNoResponseWriteAtMs = 0L
 
     @SuppressLint("MissingPermission")
     open suspend fun discoverAgentDevice(): Result<Device> = sendMutex.withLock {
@@ -115,7 +123,7 @@ open class TouchBridgeClient(
     @SuppressLint("MissingPermission")
     open suspend fun sendGestureEvent(event: GestureEvent): Result<Unit> = sendMutex.withLock {
         val requestId = requestIds.incrementAndGet()
-        sendRawMessageLocked(event.toProtocolJson(), requestId)
+        sendRawMessageLocked(event.toProtocolMessage(), requestId)
     }
 
     @SuppressLint("MissingPermission")
@@ -126,20 +134,39 @@ open class TouchBridgeClient(
 
     private suspend fun sendRawMessageLocked(raw: String, requestId: Long): Result<Unit> {
         val payload = raw
+        val allowLossyNoResponse = raw.isLossyRealtimeBleMessage()
 
         return withContext(Dispatchers.IO) {
             runCatching {
-                Log.d(TAG, "[$requestId] BLE write payload=$payload")
-
                 try {
-                    writePayload(payload.encodeToByteArray(), requestId)
-                } catch (firstError: IOException) {
-                    Log.w(TAG, "[$requestId] BLE write failed; reconnecting", firstError)
-                    closeConnection()
-                    writePayload(payload.encodeToByteArray(), requestId)
+                    writePayload(
+                        payload = payload.encodeToByteArray(),
+                        requestId = requestId,
+                        allowLossyNoResponse = allowLossyNoResponse,
+                    )
+                } catch (backpressure: BleRealtimeWriteBackpressureException) {
+                    Log.d(TAG, "[$requestId] BLE realtime packet dropped: ${backpressure.message}")
+                } catch (firstError: Exception) {
+                    if (firstError is IOException || firstError is TimeoutCancellationException) {
+                        Log.w(TAG, "[$requestId] BLE write failed (${firstError.javaClass.simpleName}); reconnecting", firstError)
+                        closeConnection()
+                        try {
+                            writePayload(
+                                payload = payload.encodeToByteArray(),
+                                requestId = requestId,
+                                allowLossyNoResponse = allowLossyNoResponse,
+                            )
+                        } catch (backpressure: BleRealtimeWriteBackpressureException) {
+                            Log.d(
+                                TAG,
+                                "[$requestId] BLE realtime packet dropped after reconnect: ${backpressure.message}",
+                            )
+                        }
+                    } else {
+                        throw firstError
+                    }
                 }
 
-                Log.d(TAG, "[$requestId] BLE sent")
                 Unit
             }.onFailure { throwable ->
                 closeConnection()
@@ -152,28 +179,36 @@ open class TouchBridgeClient(
         closeConnection()
     }
 
-    private suspend fun writePayload(payload: ByteArray, requestId: Long) {
+    private suspend fun writePayload(
+        payload: ByteArray,
+        requestId: Long,
+        allowLossyNoResponse: Boolean,
+    ) {
         val connection = activeConnection ?: connect(requestId).also {
             activeConnection = it
+        }
+
+        val noResponsePayloadLimit = (connection.mtu - ATT_HEADER_BYTES)
+            .coerceAtLeast(DEFAULT_ATT_MTU - ATT_HEADER_BYTES)
+        val writeType = if (
+            allowLossyNoResponse &&
+            connection.supportsWriteWithoutResponse &&
+            payload.size <= noResponsePayloadLimit
+        ) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+
+        if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+            writeLossyPayloadWithoutResponse(connection, payload)
+            return
         }
 
         val writeResult = CompletableDeferred<Int>()
         pendingWrite = writeResult
 
-        val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            connection.gatt.writeCharacteristic(
-                connection.characteristic,
-                payload,
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-            ) == BluetoothStatusCodes.SUCCESS
-        } else {
-            @Suppress("DEPRECATION")
-            connection.characteristic.value = payload
-            @Suppress("DEPRECATION")
-            connection.gatt.writeCharacteristic(connection.characteristic)
-        }
-
-        if (!started) {
+        if (!startCharacteristicWrite(connection, payload, writeType)) {
             pendingWrite = null
             throw IOException("BLE characteristic write did not start")
         }
@@ -185,6 +220,62 @@ open class TouchBridgeClient(
 
         if (status != BluetoothGatt.GATT_SUCCESS) {
             throw IOException("BLE characteristic write failed with GATT status $status")
+        }
+    }
+
+    private suspend fun writeLossyPayloadWithoutResponse(
+        connection: ActiveConnection,
+        payload: ByteArray,
+    ) {
+        waitForNoResponseWriteSlot()
+
+        repeat(NO_RESPONSE_WRITE_MAX_ATTEMPTS) { attempt ->
+            if (
+                startCharacteristicWrite(
+                    connection = connection,
+                    payload = payload,
+                    writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+                )
+            ) {
+                nextNoResponseWriteAtMs = SystemClock.elapsedRealtime() + NO_RESPONSE_WRITE_SPACING_MS
+                return
+            }
+
+            if (attempt < NO_RESPONSE_WRITE_MAX_ATTEMPTS - 1) {
+                delay(NO_RESPONSE_WRITE_RETRY_DELAY_MS)
+            }
+        }
+
+        nextNoResponseWriteAtMs = SystemClock.elapsedRealtime() + NO_RESPONSE_WRITE_SPACING_MS
+        throw BleRealtimeWriteBackpressureException("BLE realtime write queue is busy")
+    }
+
+    private suspend fun waitForNoResponseWriteSlot() {
+        val waitMs = nextNoResponseWriteAtMs - SystemClock.elapsedRealtime()
+        if (waitMs > 0) {
+            delay(waitMs)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startCharacteristicWrite(
+        connection: ActiveConnection,
+        payload: ByteArray,
+        writeType: Int,
+    ): Boolean {
+        connection.characteristic.writeType = writeType
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            connection.gatt.writeCharacteristic(
+                connection.characteristic,
+                payload,
+                writeType,
+            ) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            connection.characteristic.value = payload
+            @Suppress("DEPRECATION")
+            connection.gatt.writeCharacteristic(connection.characteristic)
         }
     }
 
@@ -264,6 +355,7 @@ open class TouchBridgeClient(
     ): ActiveConnection {
         val result = CompletableDeferred<ActiveConnection>()
         val mainHandler = Handler(Looper.getMainLooper())
+        var negotiatedMtu = DEFAULT_ATT_MTU
 
         fun startServiceDiscovery(gatt: BluetoothGatt) {
             if (result.isCompleted) return
@@ -286,6 +378,8 @@ open class TouchBridgeClient(
                         closeGatt(gatt)
                     }
                     newState == BluetoothProfile.STATE_CONNECTED -> {
+                        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        gatt.requestMtu(PREFERRED_ATT_MTU)
                         Log.d(
                             TAG,
                             "[$requestId] BLE connected; discovering services in ${SERVICE_DISCOVERY_DELAY_MS}ms",
@@ -344,13 +438,26 @@ open class TouchBridgeClient(
                     return
                 }
 
-                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                val supportsWriteWithoutResponse =
+                    characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0
+                characteristic.writeType = if (supportsWriteWithoutResponse) {
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                } else {
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                }
                 Log.d(
                     TAG,
                     "[$requestId] TouchBridge BLE characteristic ready " +
-                        "properties=${characteristicPropertiesText(characteristic.properties)}",
+                        "properties=${characteristicPropertiesText(characteristic.properties)} mtu=$negotiatedMtu",
                 )
-                result.complete(ActiveConnection(gatt, characteristic))
+                result.complete(
+                    ActiveConnection(
+                        gatt = gatt,
+                        characteristic = characteristic,
+                        supportsWriteWithoutResponse = supportsWriteWithoutResponse,
+                        mtu = negotiatedMtu,
+                    ),
+                )
             }
 
             override fun onCharacteristicWrite(
@@ -359,6 +466,16 @@ open class TouchBridgeClient(
                 status: Int,
             ) {
                 pendingWrite?.complete(status)
+            }
+
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    negotiatedMtu = mtu
+                    if (activeConnection?.gatt == gatt) {
+                        activeConnection?.mtu = mtu
+                    }
+                    Log.d(TAG, "[$requestId] BLE MTU changed to $mtu")
+                }
             }
         }
 
@@ -416,10 +533,20 @@ open class TouchBridgeClient(
     private data class ActiveConnection(
         val gatt: BluetoothGatt,
         val characteristic: BluetoothGattCharacteristic,
+        val supportsWriteWithoutResponse: Boolean,
+        var mtu: Int,
     )
 }
 
 private class MissingGattSchemaException(message: String) : IOException(message)
+
+private class BleRealtimeWriteBackpressureException(message: String) : IOException(message)
+
+private fun String.isLossyRealtimeBleMessage(): Boolean {
+    return startsWith("D:") ||
+        startsWith("M:") ||
+        startsWith("S:")
+}
 
 private fun describeGattServices(gatt: BluetoothGatt): String {
     return gatt.services.joinToString(separator = "; ") { service ->

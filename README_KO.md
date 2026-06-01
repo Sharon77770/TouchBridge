@@ -1,6 +1,6 @@
 # TouchBridge
 
-TouchBridge는 Android 휴대폰을 Windows PC용 제스처 컨트롤러로 사용하는 앱입니다. 모바일 앱에서 제스처나 커스텀 버튼을 입력하면 Windows Agent가 이를 받아 단축키, Python 코드, PowerShell 스크립트 같은 동작으로 실행합니다.
+TouchBridge는 Android 휴대폰을 Windows PC용 제스처, 마우스, 키보드 컨트롤러로 사용하는 앱입니다. 모바일 앱에서 제스처, 마우스 이동, 키보드 입력, 커스텀 버튼을 보내면 Windows Agent가 이를 받아 단축키, Python 코드, PowerShell 스크립트 같은 동작으로 실행합니다.
 
 ## 주요 기능
 
@@ -17,6 +17,14 @@ TouchBridge는 Android 휴대폰을 Windows PC용 제스처 컨트롤러로 사�
   - Android에서 버튼 ID와 표시 이름 추가
   - Windows Agent로 버튼 목록 동기화
   - Windows에서 버튼별 동작 매핑
+- 마우스 패드
+  - 포인터 이동, 스크롤, 왼쪽/오른쪽 클릭
+  - Android 앱에서 감도 조절
+  - BLE 연결에서는 저지연 delta 전송 사용
+- 키보드 리모트
+  - Android 휴대폰 키보드로 Windows에 텍스트 입력
+  - Enter/Backspace 입력 지원
+  - 입력창에는 작성 중인 문자가 표시되지 않음
 - Windows 동작 매핑
   - 단축키
   - Python 코드
@@ -24,6 +32,14 @@ TouchBridge는 Android 휴대폰을 Windows PC용 제스처 컨트롤러로 사�
 - Windows 트레이 백그라운드 실행
 - 한국어/영어 UI 지원
 - 제스처 전송 성공 시 Android 진동 설정
+
+## 현재 빌드 변경 사항
+
+- 런타임 메시지 포맷을 기존 JSON에서 짧은 compact 프로토콜로 변경했습니다.
+- BLE 연결은 MTU 협상, 높은 연결 우선순위, 실시간 입력의 no-response write를 사용합니다.
+- 마우스 입력은 BLE에서 짧은 delta 메시지로 전송해 지연과 끊김을 줄입니다.
+- 키보드 입력창은 마스킹 문자를 그리지 않고 실제 표시를 투명 처리해 Compose/IME offset 크래시 가능성을 제거했습니다.
+- 키보드 텍스트는 Android 전송 전과 Windows `SendInput` 실행 전에 작은 단위로 나눠 긴 입력 지연을 줄입니다.
 
 ## 프로젝트 구조
 
@@ -56,8 +72,8 @@ release/
 2. Android 앱을 설치하고 실행합니다.
 3. 첫 화면에서 연결할 PC를 선택합니다.
 4. 처음 보는 BLE 기기는 신뢰/페어링 확인을 허용합니다.
-5. 연결되면 Gesture Pad 화면에서 제스처를 입력합니다.
-6. 커스텀 버튼이 필요하면 Gesture Pad의 `+` 버튼 또는 앱 설정에서 추가합니다.
+5. 연결되면 하단 탭에서 제스처, 버튼, 마우스, 키보드 기능을 선택합니다.
+6. 커스텀 버튼이 필요하면 버튼 화면 또는 앱 설정에서 추가합니다.
 7. Windows Agent에서 커스텀 버튼 ID에 원하는 동작을 매핑합니다.
 
 ## BLE 연결
@@ -68,6 +84,13 @@ release/
 4. 연결 성공 후 Gesture Pad를 사용합니다.
 
 BLE 검색이 안 되면 Windows/Android Bluetooth 상태와 Android 권한을 확인하세요.
+
+## 마우스와 키보드 사용
+
+- 마우스 패드는 연결 후 하단 `마우스 패드` 탭에서 사용합니다.
+- BLE 마우스 이동은 실시간 입력으로 처리되어 실패 시 오래 대기하지 않고 다음 입력을 우선합니다.
+- 키보드 탭의 입력창은 포커스와 IME 입력을 받지만 입력한 문자는 화면에 표시하지 않습니다.
+- 키보드 텍스트는 compact 메시지로 나뉘어 전송되고 Windows Agent에서 Unicode `SendInput`으로 실행됩니다.
 
 ## USB 연결
 

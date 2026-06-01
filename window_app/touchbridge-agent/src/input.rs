@@ -6,29 +6,43 @@ use std::time::Duration;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    SendInput, VIRTUAL_KEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::core::{Error, HRESULT, Result};
 
 use crate::action::{Action, KeyCode, ensure_python_runtime_available};
-use crate::event::{HotkeyName, MouseButton, TouchEvent};
+use crate::event::{KeyboardRemoteKey, MouseButton, MouseButtonAction, TouchEvent};
 
 const INPUT_SETTLE_DELAY: Duration = Duration::from_millis(90);
+const KEYBOARD_TEXT_INPUT_BATCH_UNITS: usize = 32;
 const E_FAIL: HRESULT = HRESULT(0x80004005u32 as i32);
 static INPUT_LOCK: Mutex<()> = Mutex::new(());
 
 /// 파싱된 TouchBridge 이벤트를 Windows 입력으로 변환합니다.
 pub fn send_event(event: &TouchEvent) -> Result<()> {
-    let _guard = INPUT_LOCK.lock().expect("input lock poisoned");
+    if let TouchEvent::MouseDelta { dx, dy, .. } = event {
+        let _guard = INPUT_LOCK
+            .lock()
+            .map_err(|_| input_error("input lock poisoned"))?;
+        return send_mouse_move(*dx, *dy);
+    }
+
+    let _guard = INPUT_LOCK
+        .lock()
+        .map_err(|_| input_error("input lock poisoned"))?;
     let result = send_event_inner(event);
-    thread::sleep(INPUT_SETTLE_DELAY);
+    if should_settle_after_event(event) {
+        thread::sleep(INPUT_SETTLE_DELAY);
+    }
     result
 }
 
 pub fn send_action(action: &Action) -> Result<()> {
-    let _guard = INPUT_LOCK.lock().expect("input lock poisoned");
+    let _guard = INPUT_LOCK
+        .lock()
+        .map_err(|_| input_error("input lock poisoned"))?;
     let result = send_action_inner(action);
     thread::sleep(INPUT_SETTLE_DELAY);
     result
@@ -39,13 +53,23 @@ fn send_event_inner(event: &TouchEvent) -> Result<()> {
         TouchEvent::Move { dx, dy } => send_mouse_move(*dx, *dy),
         TouchEvent::Click { button } => send_mouse_click(button),
         TouchEvent::Scroll { dy } => send_mouse_scroll(*dy),
-        TouchEvent::Hotkey { name } => send_hotkey(name),
-        TouchEvent::Gesture { .. }
-        | TouchEvent::GestureEvent { .. }
+        TouchEvent::MouseDelta { .. } => Ok(()),
+        TouchEvent::MouseButtonEvent { button, action, .. } => {
+            send_mouse_button(button, matches!(action, MouseButtonAction::Down))
+        }
+        TouchEvent::KeyboardText { text, .. } => send_keyboard_text(text),
+        TouchEvent::KeyboardKey { key, .. } => send_keyboard_remote_key(key),
+        TouchEvent::GestureEvent { .. }
         | TouchEvent::Handshake { .. }
-        | TouchEvent::CustomButtonSync { .. }
+        | TouchEvent::CustomButtonSyncBegin { .. }
+        | TouchEvent::CustomButtonSyncItem { .. }
+        | TouchEvent::CustomButtonSyncEnd { .. }
         | TouchEvent::CustomButtonEvent { .. } => Ok(()),
     }
+}
+
+fn should_settle_after_event(event: &TouchEvent) -> bool {
+    matches!(event, TouchEvent::Click { .. })
 }
 
 fn send_action_inner(action: &Action) -> Result<()> {
@@ -140,6 +164,17 @@ fn send_mouse_click(button: &MouseButton) -> Result<()> {
     send_inputs(&inputs)
 }
 
+fn send_mouse_button(button: &MouseButton, down: bool) -> Result<()> {
+    let flag = match (button, down) {
+        (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
+        (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
+        (MouseButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
+        (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
+    };
+
+    send_inputs(&[mouse_input(0, 0, 0, flag)])
+}
+
 fn send_mouse_scroll(dy: i32) -> Result<()> {
     // Windows의 wheel delta는 MOUSEINPUT.mouseData에 들어갑니다.
     // 양수는 위쪽, 음수는 아래쪽 스크롤입니다. Win32는 DWORD를 받으므로
@@ -148,14 +183,50 @@ fn send_mouse_scroll(dy: i32) -> Result<()> {
     send_inputs(&[input])
 }
 
-fn send_hotkey(name: &HotkeyName) -> Result<()> {
-    match name {
-        HotkeyName::TaskManager => send_task_manager_hotkey(),
+fn send_keyboard_text(text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
     }
+
+    let mut inputs = Vec::with_capacity(KEYBOARD_TEXT_INPUT_BATCH_UNITS * 2);
+
+    for character in text.chars() {
+        let mut encoded = [0u16; 2];
+        let units = character.encode_utf16(&mut encoded);
+        let required_inputs = units.len() * 2;
+
+        if !inputs.is_empty()
+            && inputs.len() + required_inputs > KEYBOARD_TEXT_INPUT_BATCH_UNITS * 2
+        {
+            send_inputs(&inputs)?;
+            inputs.clear();
+        }
+
+        for unit in units.iter().copied() {
+            inputs.push(keyboard_unicode_input(unit, false));
+            inputs.push(keyboard_unicode_input(unit, true));
+        }
+    }
+
+    if inputs.is_empty() {
+        return Ok(());
+    }
+
+    send_inputs(&inputs)
 }
 
-fn send_task_manager_hotkey() -> Result<()> {
-    send_hotkey_keys(&[KeyCode::Ctrl, KeyCode::Shift, KeyCode::Esc])
+fn send_keyboard_remote_key(key: &KeyboardRemoteKey) -> Result<()> {
+    let key_code = match key {
+        KeyboardRemoteKey::Backspace => KeyCode::Backspace,
+        KeyboardRemoteKey::Enter => KeyCode::Enter,
+    };
+
+    send_key_press(key_code)
+}
+
+fn send_key_press(key: KeyCode) -> Result<()> {
+    let inputs = [keyboard_input(key, false), keyboard_input(key, true)];
+    send_inputs(&inputs)
 }
 
 fn send_hotkey_keys(keys: &[KeyCode]) -> Result<()> {
@@ -282,6 +353,27 @@ fn keyboard_input(key: KeyCode, key_up: bool) -> INPUT {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(0),
                 wScan: scan_code,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn keyboard_unicode_input(unit: u16, key_up: bool) -> INPUT {
+    let mut flags = KEYEVENTF_UNICODE;
+
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,

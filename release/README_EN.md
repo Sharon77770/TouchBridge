@@ -1,6 +1,6 @@
 # TouchBridge Release Guide
 
-TouchBridge turns an Android phone into a gesture and custom-button controller for one or more Windows PCs. The Windows Agent receives commands and executes mapped actions, while the Android app provides the touch pad, gesture input, and custom button UI.
+TouchBridge turns an Android phone into a gesture, mouse, keyboard, and custom-button controller for one or more Windows PCs. The Windows Agent receives commands and executes mapped actions, while the Android app provides gesture pad, mouse pad, keyboard remote, and custom button UI.
 
 ## Included Files
 
@@ -10,6 +10,13 @@ TouchBridge turns an Android phone into a gesture and custom-button controller f
   - An installable APK for testing.
 - `android/TouchBridge-Android-release-unsigned.apk`
   - An unsigned release APK. Sign it with a distribution keystore before shipping it to end users.
+
+## Current Build Notes
+
+- Android and Windows Agent now exchange commands through the compact protocol instead of JSON.
+- BLE mouse input uses low-latency delta messages and no-response writes.
+- The Android keyboard input field does not render typed characters or mask glyphs.
+- Long keyboard input is split before Android transport and before Windows `SendInput` execution.
 
 ## Requirements
 
@@ -46,9 +53,10 @@ For production distribution:
 2. Open the Android app.
 3. Select the PC to connect to from the first screen.
 4. For a first-time BLE connection, approve the trust/pairing prompt.
-5. After a successful connection, the app opens the Gesture Pad screen.
-6. Use tap, double tap, long press, swipe, two-finger gestures, and three-finger tap on the touch area.
-7. The phone can vibrate after a gesture is sent, depending on the app setting.
+5. After a successful connection, use the bottom tabs to choose gestures, buttons, mouse, or keyboard input.
+6. On the gesture area, use tap, double tap, long press, swipe, two-finger gestures, and three-finger tap.
+7. On the mouse pad, use pointer movement, scrolling, left click, and right click.
+8. On the keyboard tab, type into Windows from the Android soft keyboard; typed text is not shown in the Android input field.
 
 ## BLE Connection
 

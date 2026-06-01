@@ -34,11 +34,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -48,15 +48,18 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -67,6 +70,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -94,6 +98,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -102,8 +110,24 @@ private const val TAG = "TouchBridgeApp"
 private const val ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE"
 const val TOUCHBRIDGE_PREFS = "touchbridge_settings"
 private const val PREF_GESTURE_VIBRATION_ENABLED = "gesture_vibration_enabled"
+private const val PREF_MOUSE_PAD_SENSITIVITY = "mouse_pad_sensitivity"
 private const val PREF_APP_LANGUAGE = "app_language"
 private const val GESTURE_VIBRATION_MS = 36L
+private const val MOUSE_PAD_DEFAULT_SENSITIVITY = 1f
+private const val MOUSE_PAD_MIN_SENSITIVITY = 0.4f
+private const val MOUSE_PAD_MAX_SENSITIVITY = 3f
+private const val MOUSE_PAD_SCROLL_MULTIPLIER = 1.5f
+private const val KEYBOARD_REMOTE_SHADOW_CODE_POINT_LIMIT = 256
+private const val KEYBOARD_REMOTE_TEXT_EVENT_CHUNK_CODE_POINTS = 32
+
+private object BleMouseDeltaConfig {
+    const val TRANSMIT_TICK_MS = 6L
+    const val MAX_BATCH_DURATION_MS = 12L
+    const val MIN_DELTA_THRESHOLD_PX = 1
+    const val MIN_ACCELERATION = 1.2
+    const val MAX_ACCELERATION = 2.4
+    const val ACCELERATION_FULL_SPEED_DELTA = 42.0
+}
 
 private val AppBackground = Color(0xFF050A12)
 private val AppSurface = Color(0xFF0D1420)
@@ -209,6 +233,9 @@ private fun TouchBridgeAppContent(
     var gestureVibrationEnabled by rememberSaveable {
         mutableStateOf(loadGestureVibrationEnabled(context))
     }
+    var mousePadSensitivity by rememberSaveable {
+        mutableStateOf(loadMousePadSensitivity(context))
+    }
     var customButtonEditorVisible by rememberSaveable { mutableStateOf(false) }
     var customButtons by remember {
         mutableStateOf(loadCustomButtons(context))
@@ -218,6 +245,16 @@ private fun TouchBridgeAppContent(
     var lastGesture by remember { mutableStateOf<TouchBridgeGesture?>(null) }
     var gestureErrorMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var isSending by rememberSaveable { mutableStateOf(false) }
+    val mouseEventQueue = remember { Channel<MousePadEvent>(Channel.UNLIMITED) }
+    val bleMouseMoveQueue = remember {
+        Channel<MousePadEvent.Move>(
+            capacity = 32,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
+    }
+    val keyboardEventQueue = remember { Channel<KeyboardRemoteEvent>(capacity = 512) }
+    var bleMouseSeq by rememberSaveable { mutableStateOf(0L) }
+    var keyboardSeq by rememberSaveable { mutableStateOf(0L) }
 
     fun refreshUsbAvailability() {
         val usbAttachmentState = connectionManager.usbAttachmentState()
@@ -246,9 +283,172 @@ private fun TouchBridgeAppContent(
         }
     }
 
+    DisposableEffect(mouseEventQueue, bleMouseMoveQueue, keyboardEventQueue) {
+        onDispose {
+            mouseEventQueue.close()
+            bleMouseMoveQueue.close()
+            keyboardEventQueue.close()
+        }
+    }
+
+    LaunchedEffect(connectionManager, selectedDeviceId) {
+        var bufferedEvent: MousePadEvent? = null
+
+        while (true) {
+            val firstEvent = bufferedEvent
+                ?: mouseEventQueue.receiveCatching().getOrNull()
+                ?: break
+            bufferedEvent = null
+
+            val eventToSend = when (firstEvent) {
+                is MousePadEvent.Move -> {
+                    var dx = firstEvent.dx
+                    var dy = firstEvent.dy
+
+                    while (true) {
+                        val nextEvent = mouseEventQueue.tryReceive().getOrNull() ?: break
+                        if (nextEvent is MousePadEvent.Move) {
+                            dx += nextEvent.dx
+                            dy += nextEvent.dy
+                        } else {
+                            bufferedEvent = nextEvent
+                            break
+                        }
+                    }
+
+                    MousePadEvent.Move(dx, dy)
+                }
+
+                is MousePadEvent.Scroll -> {
+                    var dy = firstEvent.dy
+
+                    while (true) {
+                        val nextEvent = mouseEventQueue.tryReceive().getOrNull() ?: break
+                        if (nextEvent is MousePadEvent.Scroll) {
+                            dy += nextEvent.dy
+                        } else {
+                            bufferedEvent = nextEvent
+                            break
+                        }
+                    }
+
+                    MousePadEvent.Scroll(dy)
+                }
+
+                else -> firstEvent
+            }
+
+            if (eventToSend is MousePadEvent.Move && eventToSend.dx == 0 && eventToSend.dy == 0) {
+                continue
+            }
+            if (eventToSend is MousePadEvent.Scroll && eventToSend.dy == 0) {
+                continue
+            }
+
+            val activeDevice = devices.firstOrNull { it.id == selectedDeviceId }
+            connectionManager.sendMousePadEvent(eventToSend).onFailure { throwable ->
+                if (
+                    eventToSend !is MousePadEvent.Move &&
+                    eventToSend !is MousePadEvent.MouseDelta &&
+                    eventToSend !is MousePadEvent.Scroll
+                ) {
+                    showMessage(connectionErrorMessage(context, activeDevice, throwable))
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(connectionManager, selectedDeviceId) {
+        var accumulatedDx = 0
+        var accumulatedDy = 0
+        var batchStartedAt = 0L
+
+        fun addMove(move: MousePadEvent.Move) {
+            if (accumulatedDx == 0 && accumulatedDy == 0) {
+                batchStartedAt = System.currentTimeMillis()
+            }
+            accumulatedDx += move.dx
+            accumulatedDy += move.dy
+        }
+
+        suspend fun sendAccumulatedDelta(elapsedMillis: Long) {
+            val (acceleratedDx, acceleratedDy) = acceleratedBleMouseDelta(
+                dx = accumulatedDx,
+                dy = accumulatedDy,
+            )
+
+            accumulatedDx = 0
+            accumulatedDy = 0
+
+            if (acceleratedDx == 0 && acceleratedDy == 0) {
+                return
+            }
+
+            bleMouseSeq = nextBleMouseSeq(bleMouseSeq)
+            connectionManager.sendMousePadEvent(
+                MousePadEvent.MouseDelta(
+                    dx = acceleratedDx,
+                    dy = acceleratedDy,
+                    dt = elapsedMillis
+                        .coerceAtLeast(BleMouseDeltaConfig.TRANSMIT_TICK_MS)
+                        .coerceAtMost(BleMouseDeltaConfig.MAX_BATCH_DURATION_MS)
+                        .toInt(),
+                    seq = bleMouseSeq,
+                ),
+            )
+        }
+
+        while (true) {
+            val firstMove = bleMouseMoveQueue.receiveCatching().getOrNull() ?: break
+            addMove(firstMove)
+
+            while (accumulatedDx != 0 || accumulatedDy != 0) {
+                while (true) {
+                    val nextMove = bleMouseMoveQueue.tryReceive().getOrNull() ?: break
+                    addMove(nextMove)
+                }
+
+                val elapsedMillis = System.currentTimeMillis() - batchStartedAt
+                val movement = abs(accumulatedDx) + abs(accumulatedDy)
+                if (
+                    movement >= BleMouseDeltaConfig.MIN_DELTA_THRESHOLD_PX ||
+                    elapsedMillis >= BleMouseDeltaConfig.MAX_BATCH_DURATION_MS
+                ) {
+                    sendAccumulatedDelta(elapsedMillis)
+                }
+
+                delay(BleMouseDeltaConfig.TRANSMIT_TICK_MS)
+            }
+        }
+    }
+
+    LaunchedEffect(connectionManager, selectedDeviceId) {
+        while (true) {
+            val event = keyboardEventQueue.receiveCatching().getOrNull() ?: break
+            val activeDevice = devices.firstOrNull { it.id == selectedDeviceId }
+            connectionManager.sendKeyboardRemoteEvent(event).onFailure { throwable ->
+                showMessage(connectionErrorMessage(context, activeDevice, throwable))
+            }
+        }
+    }
+
+    fun nextKeyboardSequence(): Long {
+        keyboardSeq = nextKeyboardSeq(keyboardSeq)
+        return keyboardSeq
+    }
+
     fun updateGestureVibrationEnabled(enabled: Boolean) {
         gestureVibrationEnabled = enabled
         saveGestureVibrationEnabled(context, enabled)
+    }
+
+    fun updateMousePadSensitivity(sensitivity: Float) {
+        val nextSensitivity = sensitivity.coerceIn(
+            MOUSE_PAD_MIN_SENSITIVITY,
+            MOUSE_PAD_MAX_SENSITIVITY,
+        )
+        mousePadSensitivity = nextSensitivity
+        saveMousePadSensitivity(context, nextSensitivity)
     }
 
     fun updateCustomButtons(nextButtons: List<CustomButton>) {
@@ -526,6 +726,57 @@ private fun TouchBridgeAppContent(
         }
     }
 
+    fun enqueueMousePadEvent(event: MousePadEvent) {
+        val activeDeviceId = selectedDeviceId
+        if (activeDeviceId == null) {
+            if (event !is MousePadEvent.Move && event !is MousePadEvent.Scroll) {
+                showMessage(context.getString(R.string.error_no_active_connection))
+            }
+            return
+        }
+
+        val activeDevice = devices.firstOrNull { it.id == activeDeviceId }
+        if (activeDevice?.transport == TransportType.Ble && !permissionsGranted) {
+            if (event !is MousePadEvent.Move && event !is MousePadEvent.Scroll) {
+                showMessage(context.getString(R.string.error_bluetooth_permission_required))
+            }
+            onRequestPermissions()
+            return
+        }
+
+        if (activeDevice?.transport == TransportType.Ble && event is MousePadEvent.Move) {
+            bleMouseMoveQueue.trySend(event)
+            return
+        }
+
+        if (
+            !mouseEventQueue.trySend(event).isSuccess &&
+            event !is MousePadEvent.Move &&
+            event !is MousePadEvent.Scroll
+        ) {
+            showMessage(context.getString(R.string.error_usb_send_failed_format, "mouse event queue closed"))
+        }
+    }
+
+    fun enqueueKeyboardRemoteEvent(event: KeyboardRemoteEvent) {
+        val activeDeviceId = selectedDeviceId
+        if (activeDeviceId == null) {
+            showMessage(context.getString(R.string.error_no_active_connection))
+            return
+        }
+
+        val activeDevice = devices.firstOrNull { it.id == activeDeviceId }
+        if (activeDevice?.transport == TransportType.Ble && !permissionsGranted) {
+            showMessage(context.getString(R.string.error_bluetooth_permission_required))
+            onRequestPermissions()
+            return
+        }
+
+        if (!keyboardEventQueue.trySend(event).isSuccess) {
+            showMessage(context.getString(R.string.error_usb_send_failed_format, "keyboard event queue full"))
+        }
+    }
+
     val selectedDevice = devices.firstOrNull { it.id == selectedDeviceId }
     val pairingDevice = devices.firstOrNull { it.id == pairingDeviceId }
     val settingsDevice = devices.firstOrNull { it.id == settingsDeviceId }
@@ -618,8 +869,13 @@ private fun TouchBridgeAppContent(
                             lastGesture = lastGesture,
                             gestureErrorMessage = gestureErrorMessage,
                             isSending = isSending,
+                            mousePadSensitivity = mousePadSensitivity,
                             onGesture = ::sendGesture,
                             onCustomButton = ::sendCustomButton,
+                            onMousePadSensitivityChange = ::updateMousePadSensitivity,
+                            onMousePadEvent = ::enqueueMousePadEvent,
+                            onKeyboardRemoteEvent = ::enqueueKeyboardRemoteEvent,
+                            nextKeyboardSequence = ::nextKeyboardSequence,
                             onAddCustomButtonClick = { customButtonEditorVisible = true },
                             onMoveCustomButton = ::moveCustomButton,
                             onDeleteCustomButton = ::deleteCustomButton,
@@ -1146,8 +1402,13 @@ private fun GesturePadScreen(
     lastGesture: TouchBridgeGesture?,
     gestureErrorMessage: String?,
     isSending: Boolean,
+    mousePadSensitivity: Float,
     onGesture: (TouchBridgeGesture) -> Unit,
     onCustomButton: (CustomButton) -> Unit,
+    onMousePadSensitivityChange: (Float) -> Unit,
+    onMousePadEvent: (MousePadEvent) -> Unit,
+    onKeyboardRemoteEvent: (KeyboardRemoteEvent) -> Unit,
+    nextKeyboardSequence: () -> Long,
     onAddCustomButtonClick: () -> Unit,
     onMoveCustomButton: (CustomButton, Int) -> Unit,
     onDeleteCustomButton: (CustomButton) -> Unit,
@@ -1155,92 +1416,410 @@ private fun GesturePadScreen(
     onAppSettingsClick: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    var padMode by rememberSaveable { mutableStateOf(GesturePadMode.TouchPad) }
+    var padMode by rememberSaveable { mutableStateOf(GesturePadMode.GesturePad) }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            GesturePadHeader(
-                device = device,
-                mode = padMode,
-                onBack = onBack,
-                onAppSettingsClick = onAppSettingsClick,
-            )
+        GesturePadHeader(
+            device = device,
+            mode = padMode,
+            onBack = onBack,
+            onAppSettingsClick = onAppSettingsClick,
+        )
 
-            if (padMode == GesturePadMode.TouchPad) {
-                GesturePad(
-                    statusText = gestureStatusText(
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        ) {
+            when (padMode) {
+                GesturePadMode.GesturePad -> {
+                    GesturePad(
+                        statusText = gestureStatusText(
+                            status = gestureStatus,
+                            lastGesture = lastGesture,
+                            errorMessage = gestureErrorMessage,
+                        ),
                         status = gestureStatus,
-                        lastGesture = lastGesture,
-                        errorMessage = gestureErrorMessage,
-                    ),
-                    status = gestureStatus,
-                    lastGestureLabel = lastGesture?.let { gestureLabel(it) } ?: stringResource(R.string.none),
-                    isSending = isSending,
-                    onGesture = onGesture,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                )
-                GesturePadFooter(lastGesture = lastGesture)
-                QuickGestureBar(onGesture = onGesture)
-            } else {
-                CustomButtonGrid(
-                    buttons = customButtons,
-                    isSending = isSending,
-                    onButtonClick = onCustomButton,
-                    onAddClick = onAddCustomButtonClick,
-                    onMove = onMoveCustomButton,
-                    onDelete = onDeleteCustomButton,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
+                        lastGestureLabel = lastGesture?.let { gestureLabel(it) } ?: stringResource(R.string.none),
+                        isSending = isSending,
+                        onGesture = onGesture,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+
+                GesturePadMode.CustomButtons -> {
+                    CustomButtonGrid(
+                        buttons = customButtons,
+                        isSending = isSending,
+                        onButtonClick = onCustomButton,
+                        onAddClick = onAddCustomButtonClick,
+                        onMove = onMoveCustomButton,
+                        onDelete = onDeleteCustomButton,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+
+                GesturePadMode.MousePad -> {
+                    MousePad(
+                        sensitivity = mousePadSensitivity,
+                        onSensitivityChange = onMousePadSensitivityChange,
+                        onMouseEvent = onMousePadEvent,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+
+                GesturePadMode.Keyboard -> {
+                    KeyboardRemotePad(
+                        onKeyboardEvent = onKeyboardRemoteEvent,
+                        nextSequence = nextKeyboardSequence,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        }
+
+        TouchBridgeNavigationBar(
+            mode = padMode,
+            onModeChange = { padMode = it },
+        )
+    }
+}
+
+@Composable
+private fun TouchBridgeNavigationBar(
+    mode: GesturePadMode,
+    onModeChange: (GesturePadMode) -> Unit,
+) {
+    NavigationBar(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp),
+        containerColor = AppSurfaceHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        GesturePadMode.entries.forEach { item ->
+            NavigationBarItem(
+                selected = mode == item,
+                onClick = { onModeChange(item) },
+                icon = {
+                    Text(
+                        text = item.navGlyph,
+                        fontWeight = FontWeight.Bold,
+                    )
+                },
+                label = {
+                    Text(
+                        text = gesturePadModeLabel(item),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun MousePad(
+    sensitivity: Float,
+    onSensitivityChange: (Float) -> Unit,
+    onMouseEvent: (MousePadEvent) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier,
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .heightIn(min = 320.dp)
+                .border(2.dp, AppBlue.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+                .pointerInput(sensitivity, onMouseEvent) {
+                    awaitEachGesture {
+                        val firstDown = awaitFirstDown(requireUnconsumed = false)
+                        val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+                        val tapSlop = viewConfiguration.touchSlop * 2.2f
+                        val pointerStarts = mutableMapOf(firstDown.id to firstDown.position)
+                        var previousCentroid = firstDown.position
+                        var previousPointerCount = 1
+                        var maxPointerCount = 1
+                        var maxPointerTravel = 0f
+                        var upTime = firstDown.uptimeMillis
+                        var dragging = false
+                        var moveRemainderX = 0f
+                        var moveRemainderY = 0f
+                        var scrollRemainder = 0f
+
+                        fun emitMove(delta: Offset) {
+                            val scaledX = moveRemainderX + delta.x * sensitivity
+                            val scaledY = moveRemainderY + delta.y * sensitivity
+                            val dx = scaledX.roundToInt()
+                            val dy = scaledY.roundToInt()
+                            moveRemainderX = scaledX - dx
+                            moveRemainderY = scaledY - dy
+
+                            if (dx != 0 || dy != 0) {
+                                onMouseEvent(MousePadEvent.Move(dx, dy))
+                            }
+                        }
+
+                        fun emitScroll(deltaY: Float) {
+                            val scaled = scrollRemainder -
+                                deltaY * sensitivity * MOUSE_PAD_SCROLL_MULTIPLIER
+                            val dy = scaled.roundToInt()
+                            scrollRemainder = scaled - dy
+
+                            if (dy != 0) {
+                                onMouseEvent(MousePadEvent.Scroll(dy))
+                            }
+                        }
+
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            upTime = event.changes.maxOf { it.uptimeMillis }
+
+                            if (pressed.isNotEmpty()) {
+                                val wasWithinTapSlop = maxPointerTravel <= tapSlop
+                                val activeCentroid = pressed.centroid()
+                                val pointerCountChanged = pressed.size != previousPointerCount
+                                val delta = if (pointerCountChanged) {
+                                    Offset.Zero
+                                } else {
+                                    activeCentroid - previousCentroid
+                                }
+
+                                previousCentroid = activeCentroid
+                                previousPointerCount = pressed.size
+                                maxPointerCount = maxOf(maxPointerCount, pressed.size)
+
+                                pressed.forEach { change ->
+                                    val start = pointerStarts.getOrPut(change.id) { change.position }
+                                    maxPointerTravel = maxOf(
+                                        maxPointerTravel,
+                                        (change.position - start).getDistance(),
+                                    )
+                                }
+
+                                when {
+                                    pressed.size >= 2 -> emitScroll(delta.y)
+                                    maxPointerCount == 1 -> {
+                                        if (
+                                            !dragging &&
+                                            upTime - firstDown.uptimeMillis >= longPressTimeout &&
+                                            wasWithinTapSlop
+                                        ) {
+                                            onMouseEvent(
+                                                MousePadEvent.Button(
+                                                    button = TouchBridgeMouseButton.Left,
+                                                    action = TouchBridgeMouseButtonAction.Down,
+                                                ),
+                                            )
+                                            dragging = true
+                                        }
+
+                                        emitMove(delta)
+                                    }
+                                }
+
+                                event.changes.forEach { change ->
+                                    if (change.pressed) {
+                                        change.consume()
+                                    }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        val duration = upTime - firstDown.uptimeMillis
+                        if (dragging) {
+                            onMouseEvent(
+                                MousePadEvent.Button(
+                                    button = TouchBridgeMouseButton.Left,
+                                    action = TouchBridgeMouseButtonAction.Up,
+                                ),
+                            )
+                        } else if (maxPointerTravel <= tapSlop && duration < longPressTimeout) {
+                            when (maxPointerCount) {
+                                1 -> onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Left))
+                                2 -> onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Right))
+                            }
+                        }
+                    }
+                },
+            shape = RoundedCornerShape(8.dp),
+            color = AppSurfaceHigh,
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                AppGreen.copy(alpha = 0.16f),
+                                AppBlue.copy(alpha = 0.08f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    )
+                    .padding(18.dp),
+            ) {
+                GesturePadBoundaryChrome(color = AppBlue)
+                Text(
+                    text = stringResource(R.string.mouse_pad),
+                    modifier = Modifier.align(Alignment.TopStart),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
 
-        FloatingActionButton(
-            onClick = {
-                padMode = if (padMode == GesturePadMode.TouchPad) {
-                    GesturePadMode.CustomButtons
-                } else {
-                    GesturePadMode.TouchPad
-                }
-            },
+        MousePadControls(
+            sensitivity = sensitivity,
+            onSensitivityChange = onSensitivityChange,
+            onMouseEvent = onMouseEvent,
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(bottom = 10.dp),
-            containerColor = AppBlue,
-            contentColor = Color(0xFF07111D),
-        ) {
-            Text(
-                text = if (padMode == GesturePadMode.TouchPad) {
-                    stringResource(R.string.custom_buttons_short)
-                } else {
-                    stringResource(R.string.touch_pad_short)
-                },
-                fontWeight = FontWeight.Bold,
-            )
-        }
+                .align(Alignment.BottomCenter)
+                .padding(8.dp),
+        )
+    }
+}
 
-        FloatingActionButton(
-            onClick = onAddCustomButtonClick,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(bottom = 10.dp),
-            containerColor = AppGreen,
-            contentColor = Color(0xFF06110C),
+@Composable
+private fun MousePadControls(
+    sensitivity: Float,
+    onSensitivityChange: (Float) -> Unit,
+    onMouseEvent: (MousePadEvent) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = AppSurface.copy(alpha = 0.94f),
+        border = BorderStroke(1.dp, AppOutline),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                text = "+",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.mouse_sensitivity),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Slider(
+                    value = sensitivity,
+                    onValueChange = onSensitivityChange,
+                    valueRange = MOUSE_PAD_MIN_SENSITIVITY..MOUSE_PAD_MAX_SENSITIVITY,
+                    steps = 12,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(32.dp),
+                )
+                Text(
+                    text = String.format(Locale.getDefault(), "%.1fx", sensitivity),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AppBlue,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Left)) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.mouse_left_click),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Right)) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.mouse_right_click),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeyboardRemotePad(
+    onKeyboardEvent: (KeyboardRemoteEvent) -> Unit,
+    nextSequence: () -> Long,
+    modifier: Modifier = Modifier,
+) {
+    var inputText by remember { mutableStateOf("") }
+
+    Surface(
+        modifier = modifier
+            .heightIn(min = 320.dp)
+            .border(2.dp, AppGreen.copy(alpha = 0.72f), RoundedCornerShape(8.dp)),
+        shape = RoundedCornerShape(8.dp),
+        color = AppSurfaceHigh,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            AppBlue.copy(alpha = 0.14f),
+                            AppGreen.copy(alpha = 0.08f),
+                            Color.Transparent,
+                        ),
+                    ),
+                )
+                .padding(14.dp),
+        ) {
+            GesturePadBoundaryChrome(color = AppGreen)
+            OutlinedTextField(
+                value = inputText,
+                onValueChange = { nextText ->
+                    val events = keyboardRemoteEventsForTextChange(
+                        previous = inputText,
+                        next = nextText,
+                        nextSequence = nextSequence,
+                    )
+                    inputText = boundedKeyboardShadowText(nextText)
+                    events.forEach(onKeyboardEvent)
+                },
+                modifier = Modifier.fillMaxSize(),
+                label = { Text(stringResource(R.string.keyboard_remote_input)) },
+                singleLine = false,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color.Transparent),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.Transparent,
+                    unfocusedTextColor = Color.Transparent,
+                    cursorColor = Color.Transparent,
+                ),
+                shape = RoundedCornerShape(8.dp),
             )
         }
     }
@@ -1260,16 +1839,19 @@ private fun GesturePadHeader(
         border = BorderStroke(1.dp, AppOutline),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onBack) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.size(36.dp),
+            ) {
                 Text(text = "‹")
             }
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 Text(
                     text = device.name,
@@ -1288,7 +1870,7 @@ private fun GesturePadHeader(
                 )
             }
             Row(
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 StatusDot(status = device.connectionStatus, available = device.available)
@@ -1297,56 +1879,12 @@ private fun GesturePadHeader(
                     style = MaterialTheme.typography.labelMedium,
                     color = deviceStatusColor(device),
                 )
-                TextButton(onClick = onAppSettingsClick) {
+                TextButton(
+                    onClick = onAppSettingsClick,
+                    modifier = Modifier.height(36.dp),
+                ) {
                     Text(text = stringResource(R.string.app_settings))
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun GesturePadFooter(lastGesture: TouchBridgeGesture?) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        color = AppSurface,
-        border = BorderStroke(1.dp, AppOutline),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.current_profile),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = stringResource(R.string.default_profile),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.last_executed_gesture),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = lastGesture?.let { gestureLabel(it) } ?: stringResource(R.string.none),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
         }
     }
@@ -1823,7 +2361,7 @@ private fun GesturePad(
             }
 
             Text(
-                text = stringResource(R.string.touch_pad),
+                text = stringResource(R.string.gesture_pad),
                 modifier = Modifier.align(Alignment.TopStart),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1836,32 +2374,6 @@ private fun GesturePad(
                         .fillMaxWidth(),
                     color = AppAmber,
                     trackColor = AppOutline,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun QuickGestureBar(onGesture: (TouchBridgeGesture) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        TouchBridgeGesture.entries.forEach { gesture ->
-            OutlinedButton(
-                onClick = { onGesture(gesture) },
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            ) {
-                Text(
-                    text = gestureShortLabel(gesture),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -2157,11 +2669,6 @@ private fun gestureLabel(gesture: TouchBridgeGesture): String {
 }
 
 @Composable
-private fun gestureShortLabel(gesture: TouchBridgeGesture): String {
-    return stringResource(gesture.shortLabelRes)
-}
-
-@Composable
 private fun deviceTypeLabel(type: DeviceType): String {
     return when (type) {
         DeviceType.Laptop -> stringResource(R.string.device_type_laptop)
@@ -2195,8 +2702,10 @@ private fun connectedTransportLabel(transport: TransportType): String {
 @Composable
 private fun gesturePadModeLabel(mode: GesturePadMode): String {
     return when (mode) {
-        GesturePadMode.TouchPad -> stringResource(R.string.touch_pad)
-        GesturePadMode.CustomButtons -> stringResource(R.string.custom_buttons)
+        GesturePadMode.GesturePad -> stringResource(R.string.gesture_pad)
+        GesturePadMode.CustomButtons -> stringResource(R.string.buttons_tab)
+        GesturePadMode.MousePad -> stringResource(R.string.mouse_pad)
+        GesturePadMode.Keyboard -> stringResource(R.string.keyboard_remote)
     }
 }
 
@@ -2351,6 +2860,151 @@ private fun saveGestureVibrationEnabled(context: Context, enabled: Boolean) {
         .apply()
 }
 
+private fun loadMousePadSensitivity(context: Context): Float {
+    return context
+        .getSharedPreferences(TOUCHBRIDGE_PREFS, Context.MODE_PRIVATE)
+        .getFloat(PREF_MOUSE_PAD_SENSITIVITY, MOUSE_PAD_DEFAULT_SENSITIVITY)
+        .coerceIn(MOUSE_PAD_MIN_SENSITIVITY, MOUSE_PAD_MAX_SENSITIVITY)
+}
+
+private fun saveMousePadSensitivity(context: Context, sensitivity: Float) {
+    context
+        .getSharedPreferences(TOUCHBRIDGE_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putFloat(
+            PREF_MOUSE_PAD_SENSITIVITY,
+            sensitivity.coerceIn(MOUSE_PAD_MIN_SENSITIVITY, MOUSE_PAD_MAX_SENSITIVITY),
+        )
+        .apply()
+}
+
+private fun acceleratedBleMouseDelta(dx: Int, dy: Int): Pair<Int, Int> {
+    if (dx == 0 && dy == 0) {
+        return 0 to 0
+    }
+
+    val magnitude = sqrt((dx * dx + dy * dy).toDouble())
+    val accelerationProgress = (magnitude / BleMouseDeltaConfig.ACCELERATION_FULL_SPEED_DELTA)
+        .coerceIn(0.0, 1.0)
+    val acceleration = BleMouseDeltaConfig.MIN_ACCELERATION +
+        (BleMouseDeltaConfig.MAX_ACCELERATION - BleMouseDeltaConfig.MIN_ACCELERATION) *
+        accelerationProgress
+    val acceleratedDx = (dx * acceleration).roundToInt()
+    val acceleratedDy = (dy * acceleration).roundToInt()
+
+    return acceleratedDx to acceleratedDy
+}
+
+private fun nextBleMouseSeq(current: Long): Long {
+    return if (current == Long.MAX_VALUE) 1L else current + 1L
+}
+
+private fun nextKeyboardSeq(current: Long): Long {
+    return if (current == Long.MAX_VALUE) 1L else current + 1L
+}
+
+private fun keyboardRemoteEventsForTextChange(
+    previous: String,
+    next: String,
+    nextSequence: () -> Long,
+): List<KeyboardRemoteEvent> {
+    var prefixLength = 0
+    val commonPrefixLimit = minOf(previous.length, next.length)
+    while (
+        prefixLength < commonPrefixLimit &&
+        previous[prefixLength] == next[prefixLength]
+    ) {
+        prefixLength++
+    }
+
+    var suffixLength = 0
+    while (
+        suffixLength < previous.length - prefixLength &&
+        suffixLength < next.length - prefixLength &&
+        previous[previous.length - suffixLength - 1] == next[next.length - suffixLength - 1]
+    ) {
+        suffixLength++
+    }
+
+    val removedCount = previous.length - prefixLength - suffixLength
+    val insertedText = next.substring(prefixLength, next.length - suffixLength)
+    val events = mutableListOf<KeyboardRemoteEvent>()
+
+    repeat(removedCount) {
+        events += KeyboardRemoteEvent.KeyPress(
+            key = TouchBridgeKeyboardKey.Backspace,
+            seq = nextSequence(),
+        )
+    }
+
+    appendKeyboardTextEvents(
+        text = insertedText,
+        nextSequence = nextSequence,
+        events = events,
+    )
+
+    return events
+}
+
+private fun appendKeyboardTextEvents(
+    text: String,
+    nextSequence: () -> Long,
+    events: MutableList<KeyboardRemoteEvent>,
+) {
+    var chunkStart = 0
+    var chunkCodePoints = 0
+    var index = 0
+
+    fun flushTextChunk(endIndex: Int) {
+        if (chunkStart < endIndex) {
+            events += KeyboardRemoteEvent.TextInput(
+                text = text.substring(chunkStart, endIndex),
+                seq = nextSequence(),
+            )
+        }
+        chunkStart = endIndex
+        chunkCodePoints = 0
+    }
+
+    while (index < text.length) {
+        val codePoint = text.codePointAt(index)
+        val charCount = Character.charCount(codePoint)
+
+        if (codePoint == '\n'.code) {
+            flushTextChunk(index)
+            events += KeyboardRemoteEvent.KeyPress(
+                key = TouchBridgeKeyboardKey.Enter,
+                seq = nextSequence(),
+            )
+            index += charCount
+            chunkStart = index
+            chunkCodePoints = 0
+            continue
+        }
+
+        if (chunkCodePoints >= KEYBOARD_REMOTE_TEXT_EVENT_CHUNK_CODE_POINTS) {
+            flushTextChunk(index)
+        }
+
+        index += charCount
+        chunkCodePoints++
+    }
+
+    flushTextChunk(text.length)
+}
+
+private fun boundedKeyboardShadowText(value: String): String {
+    if (value.codePointCount(0, value.length) <= KEYBOARD_REMOTE_SHADOW_CODE_POINT_LIMIT) {
+        return value
+    }
+
+    var index = value.length
+    repeat(KEYBOARD_REMOTE_SHADOW_CODE_POINT_LIMIT) {
+        index = value.offsetByCodePoints(index, -1)
+    }
+    return value.substring(index)
+}
+
 @Suppress("DEPRECATION")
 private fun vibrateForGesture(context: Context) {
     val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -2448,9 +3102,11 @@ private enum class GestureSendStatus {
     Error,
 }
 
-private enum class GesturePadMode {
-    TouchPad,
-    CustomButtons,
+private enum class GesturePadMode(val navGlyph: String) {
+    GesturePad("G"),
+    CustomButtons("B"),
+    MousePad("M"),
+    Keyboard("K"),
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF050A12)

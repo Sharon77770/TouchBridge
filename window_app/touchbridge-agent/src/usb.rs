@@ -189,7 +189,7 @@ async fn serve_tcp_stream(stream: TcpStream, state: SharedAppState) -> Result<()
 
         println!("USB cable network request: {line}");
         let ack = dispatch::handle_raw_message(line, "usb", &state);
-        let response = format!("{}\n", ack.to_json());
+        let response = format!("{}\n", ack.to_compact());
         writer
             .write_all(response.as_bytes())
             .await
@@ -509,7 +509,7 @@ async fn receive_loop(
 
             println!("USB request: {line}");
             let ack = dispatch::handle_raw_message(&line, "usb", &state);
-            let response = format!("{}\n", ack.to_json());
+            let response = format!("{}\n", ack.to_compact());
             writer.WriteString(&HSTRING::from(response))?;
             writer.StoreAsync()?.into_future().await?;
         }

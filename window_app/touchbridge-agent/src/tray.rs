@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -40,6 +41,7 @@ struct TraySignals {
     language: AtomicU8,
     show_requested: AtomicBool,
     exit_requested: AtomicBool,
+    force_exit_started: AtomicBool,
     repaint_context: Mutex<Option<egui::Context>>,
 }
 
@@ -52,6 +54,7 @@ impl TrayHandle {
             language: AtomicU8::new(language_to_u8(language)),
             show_requested: AtomicBool::new(false),
             exit_requested: AtomicBool::new(false),
+            force_exit_started: AtomicBool::new(false),
             repaint_context: Mutex::new(None),
         });
 
@@ -74,10 +77,6 @@ impl TrayHandle {
         self.signals.exit_requested.swap(false, Ordering::SeqCst)
     }
 
-    pub fn is_available(&self) -> bool {
-        self.signals.available.load(Ordering::SeqCst)
-    }
-
     pub fn set_language(&self, language: AppLanguage) {
         self.signals
             .language
@@ -90,6 +89,10 @@ impl TrayHandle {
         };
 
         *repaint_context = Some(context);
+    }
+
+    pub fn request_exit(&self) {
+        request_exit();
     }
 }
 
@@ -265,6 +268,12 @@ unsafe extern "system" fn tray_window_proc(
             }
             LRESULT(0)
         }
+        WM_CLOSE => {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
             unsafe {
                 PostQuitMessage(0);
@@ -306,9 +315,22 @@ fn request_exit() {
     if let Some(signals) = TRAY_SIGNALS.get() {
         signals.exit_requested.store(true, Ordering::SeqCst);
         request_gui_repaint(signals);
+        schedule_force_exit(signals);
     }
 
     close_main_window();
+    close_tray_window();
+}
+
+fn schedule_force_exit(signals: &TraySignals) {
+    if signals.force_exit_started.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    thread::spawn(|| {
+        thread::sleep(Duration::from_millis(1200));
+        process::exit(0);
+    });
 }
 
 fn request_gui_repaint(signals: &TraySignals) {
@@ -334,6 +356,21 @@ fn show_main_window() {
 
 fn close_main_window() {
     let Some(hwnd) = main_window() else {
+        return;
+    };
+
+    let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+}
+
+fn close_tray_window() {
+    let Ok(hwnd) = (unsafe {
+        FindWindowExW(
+            Some(HWND_MESSAGE),
+            None,
+            w!("TouchBridgeAgentTrayWindow"),
+            w!("TouchBridge Agent Tray"),
+        )
+    }) else {
         return;
     };
 

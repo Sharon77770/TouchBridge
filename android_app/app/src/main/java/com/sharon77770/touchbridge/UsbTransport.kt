@@ -88,7 +88,7 @@ class UsbTransport(
             val connection = openBestUsbConnection()
             activeConnection = connection
 
-            val ack = connection.exchange(handshakeJson(device.id))
+            val ack = connection.exchange(handshakeMessage(device.id))
             if (!ack.ok) {
                 close()
                 throw UsbTransportException(
@@ -110,7 +110,7 @@ class UsbTransport(
     }
 
     override suspend fun sendGestureEvent(event: GestureEvent): Result<ProtocolAck> = mutex.withLock {
-        sendRawMessageLocked(event.toProtocolJson())
+        sendRawMessageLocked(event.toProtocolMessage())
     }
 
     override suspend fun sendRawMessage(raw: String): Result<ProtocolAck> = mutex.withLock {

@@ -1,13 +1,14 @@
 use std::future::IntoFuture;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristicProperties, GattLocalCharacteristic, GattLocalCharacteristicParameters,
     GattLocalCharacteristicResult, GattProtectionLevel, GattServiceProvider,
     GattServiceProviderAdvertisementStatus, GattServiceProviderAdvertisementStatusChangedEventArgs,
-    GattServiceProviderAdvertisingParameters, GattWriteRequestedEventArgs,
+    GattServiceProviderAdvertisingParameters, GattWriteOption, GattWriteRequestedEventArgs,
 };
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{Deferral, TypedEventHandler};
 use windows::Storage::Streams::DataReader;
 use windows::core::Result;
 
@@ -15,6 +16,12 @@ use crate::config::SharedAppState;
 use crate::dispatch;
 use crate::i18n::{self, AppLanguage, BleAdvertiseStatusText};
 use crate::protocol::{GESTURE_CHARACTERISTIC_UUID, SERVICE_UUID, SERVICE_UUID_STRING};
+
+struct BleWriteJob {
+    args: GattWriteRequestedEventArgs,
+    deferral: Deferral,
+    state: SharedAppState,
+}
 
 pub async fn run(state: SharedAppState) -> Result<()> {
     set_ble_status(&state, i18n::ble_creating(language(&state)), None);
@@ -28,7 +35,7 @@ pub async fn run(state: SharedAppState) -> Result<()> {
         GattCharacteristicProperties::Write | GattCharacteristicProperties::WriteWithoutResponse,
     )?;
     characteristic_parameters.SetWriteProtectionLevel(GattProtectionLevel::Plain)?;
-    characteristic_parameters.SetUserDescription(&"TouchBridge Gesture JSON".into())?;
+    characteristic_parameters.SetUserDescription(&"TouchBridge Compact Input".into())?;
 
     let characteristic_result = service
         .CreateCharacteristicAsync(GESTURE_CHARACTERISTIC_UUID, &characteristic_parameters)?
@@ -63,6 +70,7 @@ fn register_write_handler(
     characteristic: &GattLocalCharacteristic,
     state: SharedAppState,
 ) -> Result<()> {
+    let write_sender = start_write_worker();
     let handler = TypedEventHandler::<GattLocalCharacteristic, GattWriteRequestedEventArgs>::new(
         move |_sender, args| {
             let Some(args) = args.cloned() else {
@@ -72,15 +80,17 @@ fn register_write_handler(
             let deferral = args.GetDeferral()?;
             let state = state.clone();
 
-            thread::spawn(move || {
-                if let Err(err) = handle_write(args, state) {
-                    eprintln!("BLE write failed: {err}");
-                }
-
-                if let Err(err) = deferral.Complete() {
+            if let Err(err) = write_sender.send(BleWriteJob {
+                args,
+                deferral,
+                state,
+            }) {
+                let job = err.0;
+                eprintln!("BLE write queue failed");
+                if let Err(err) = job.deferral.Complete() {
                     eprintln!("BLE write deferral completion failed: {err}");
                 }
-            });
+            }
 
             Ok(())
         },
@@ -90,17 +100,45 @@ fn register_write_handler(
     Ok(())
 }
 
-fn handle_write(args: GattWriteRequestedEventArgs, state: SharedAppState) -> Result<()> {
-    let runtime = tokio::runtime::Runtime::new().expect("failed to create BLE write runtime");
+fn start_write_worker() -> Sender<BleWriteJob> {
+    let (sender, receiver) = mpsc::channel::<BleWriteJob>();
+
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create BLE write runtime");
+
+        while let Ok(job) = receiver.recv() {
+            if let Err(err) = handle_write(&runtime, job.args, job.state) {
+                eprintln!("BLE write failed: {err}");
+            }
+
+            if let Err(err) = job.deferral.Complete() {
+                eprintln!("BLE write deferral completion failed: {err}");
+            }
+        }
+    });
+
+    sender
+}
+
+fn handle_write(
+    runtime: &tokio::runtime::Runtime,
+    args: GattWriteRequestedEventArgs,
+    state: SharedAppState,
+) -> Result<()> {
     let request = runtime.block_on(args.GetRequestAsync()?.into_future())?;
+    let write_option = request.Option()?;
     let value = request.Value()?;
     let raw = buffer_to_string(value)?;
 
-    println!("BLE request: {raw}");
     let _ = dispatch::handle_raw_message(&raw, "ble", &state);
 
-    if let Err(err) = request.Respond() {
-        eprintln!("BLE write response failed: {err}");
+    if write_option == GattWriteOption::WriteWithResponse {
+        if let Err(err) = request.Respond() {
+            eprintln!("BLE write response failed: {err}");
+        }
     }
 
     Ok(())

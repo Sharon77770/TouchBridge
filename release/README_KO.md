@@ -1,6 +1,6 @@
 # TouchBridge 배포 안내
 
-TouchBridge는 Android 휴대폰을 여러 Windows PC에 연결해 제스처와 커스텀 버튼 입력을 전송하는 컨트롤러입니다. Windows Agent가 입력 실행을 담당하고, Android 앱은 터치패드, 제스처, 커스텀 버튼 UI를 제공합니다.
+TouchBridge는 Android 휴대폰을 여러 Windows PC에 연결해 제스처, 마우스, 키보드, 커스텀 버튼 입력을 전송하는 컨트롤러입니다. Windows Agent가 입력 실행을 담당하고, Android 앱은 제스처 패드, 마우스 패드, 키보드 리모트, 커스텀 버튼 UI를 제공합니다.
 
 ## 포함 파일
 
@@ -10,6 +10,13 @@ TouchBridge는 Android 휴대폰을 여러 Windows PC에 연결해 제스처와 
   - 바로 설치 테스트가 가능한 Android APK입니다.
 - `android/TouchBridge-Android-release-unsigned.apk`
   - 배포 서명 전 release APK입니다. 일반 사용자 설치용으로 배포하려면 별도 keystore로 서명해야 합니다.
+
+## 현재 빌드 노트
+
+- Android와 Windows Agent는 기존 JSON 대신 짧은 compact 프로토콜로 명령을 주고받습니다.
+- BLE 마우스 입력은 낮은 지연을 위해 delta 메시지와 no-response write를 사용합니다.
+- Android 키보드 입력창은 문자를 표시하지 않으며, 마스킹 문자도 그리지 않습니다.
+- 긴 키보드 입력은 Android 전송과 Windows `SendInput` 실행 단계에서 작은 단위로 나뉩니다.
 
 ## 요구 사항
 
@@ -46,9 +53,10 @@ TouchBridge는 Android 휴대폰을 여러 Windows PC에 연결해 제스처와 
 2. Android 앱을 실행합니다.
 3. 첫 화면에서 연결할 기기를 선택합니다.
 4. 처음 연결하는 BLE 기기는 신뢰/페어링 확인을 허용합니다.
-5. 연결되면 Gesture Pad 화면으로 이동합니다.
-6. 터치 영역에서 탭, 더블 탭, 롱 프레스, 스와이프, 두 손가락/세 손가락 제스처를 입력합니다.
-7. 제스처가 전송되면 설정에 따라 휴대폰 진동이 발생합니다.
+5. 연결되면 하단 탭에서 제스처, 버튼, 마우스, 키보드 기능을 선택합니다.
+6. 제스처 영역에서는 탭, 더블 탭, 롱 프레스, 스와이프, 두 손가락/세 손가락 제스처를 입력합니다.
+7. 마우스 패드에서는 포인터 이동, 스크롤, 왼쪽/오른쪽 클릭을 사용할 수 있습니다.
+8. 키보드 탭에서는 휴대폰 키보드로 Windows에 텍스트를 보낼 수 있으며 입력창에는 작성한 문자가 표시되지 않습니다.
 
 ## BLE 연결
 

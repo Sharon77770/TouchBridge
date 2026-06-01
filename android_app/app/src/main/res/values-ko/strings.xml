@@ -38,7 +38,15 @@
     <string name="gesture_vibration">제스처 진동</string>
     <string name="gesture_vibration_body">제스처가 성공적으로 전송되면 휴대폰을 진동시킵니다.</string>
     <string name="custom_buttons">커스텀 버튼</string>
+    <string name="buttons_tab">버튼</string>
     <string name="custom_buttons_short">버튼</string>
+    <string name="gesture_pad">제스처 패드</string>
+    <string name="mouse_pad">마우스 패드</string>
+    <string name="keyboard_remote">키보드</string>
+    <string name="keyboard_remote_input">입력</string>
+    <string name="mouse_sensitivity">감도</string>
+    <string name="mouse_left_click">왼쪽 클릭</string>
+    <string name="mouse_right_click">오른쪽 클릭</string>
     <string name="touch_pad_short">패드</string>
     <string name="custom_buttons_body">연결된 Windows Agent로 이름 있는 커스텀 버튼 신호를 전송합니다.</string>
     <string name="empty_custom_buttons">아직 커스텀 버튼이 없습니다.</string>
@@ -70,7 +78,7 @@
     <string name="gesture_pad_connected_subtitle">휴대폰 제스처 컨트롤러로 연결됨</string>
     <string name="connected_via_ble">BLE 연결됨</string>
     <string name="connected_via_usb">USB 연결됨</string>
-    <string name="touch_pad">터치 패드</string>
+    <string name="touch_pad">제스처 패드</string>
     <string name="current_profile">현재 프로파일</string>
     <string name="default_profile">기본 제스처</string>
     <string name="last_executed_gesture">마지막 실행 제스처</string>

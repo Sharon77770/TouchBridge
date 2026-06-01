@@ -1,6 +1,6 @@
 # TouchBridge
 
-TouchBridge turns an Android phone into a gesture controller for Windows PCs. The mobile app sends gestures and custom button events, and the Windows Agent receives them to execute hotkeys, Python code, PowerShell scripts, or other mapped actions.
+TouchBridge turns an Android phone into a gesture, mouse, and keyboard controller for Windows PCs. The mobile app sends gestures, mouse movement, keyboard input, and custom button events, and the Windows Agent receives them to execute hotkeys, Python code, PowerShell scripts, or other mapped actions.
 
 ## Features
 
@@ -17,6 +17,14 @@ TouchBridge turns an Android phone into a gesture controller for Windows PCs. Th
   - Add button IDs and display labels on Android
   - Sync button lists to the Windows Agent
   - Map each button to an action on Windows
+- Mouse pad
+  - Pointer movement, scrolling, left click, and right click
+  - Sensitivity control in the Android app
+  - Low-latency delta transport for BLE connections
+- Keyboard remote
+  - Type into Windows from the Android soft keyboard
+  - Enter and Backspace support
+  - Typed text is not shown in the Android input field
 - Windows action mappings
   - Hotkeys
   - Python code
@@ -24,6 +32,14 @@ TouchBridge turns an Android phone into a gesture controller for Windows PCs. Th
 - Windows tray background operation
 - Korean and English UI support
 - Optional Android vibration after successful gesture sends
+
+## Current Build Notes
+
+- Runtime messages now use the compact TouchBridge protocol instead of the previous JSON format.
+- BLE uses MTU negotiation, high connection priority, and no-response writes for realtime input where supported.
+- Mouse input uses short BLE delta messages to reduce latency and stutter.
+- The keyboard input field hides typed text without returning an empty visual transformation, avoiding Compose/IME offset crashes.
+- Keyboard text is chunked before Android transport and before Windows `SendInput` execution to reduce long-input stalls.
 
 ## Project Structure
 
@@ -56,8 +72,8 @@ Distribution artifacts are available in the `release/` folder.
 2. Install and open the Android app.
 3. Select the PC to connect to from the first screen.
 4. Approve the trust/pairing prompt for first-time BLE devices.
-5. After connection, use gestures on the Gesture Pad screen.
-6. Add custom buttons from the Gesture Pad `+` button or app settings if needed.
+5. After connection, use the bottom tabs to choose gestures, buttons, mouse, or keyboard input.
+6. Add custom buttons from the button screen or app settings if needed.
 7. Map each custom button ID to an action in the Windows Agent.
 
 ## BLE Connection
@@ -68,6 +84,13 @@ Distribution artifacts are available in the `release/` folder.
 4. Use the Gesture Pad after the connection succeeds.
 
 If BLE discovery fails, check Windows/Android Bluetooth state and Android Bluetooth permissions.
+
+## Mouse And Keyboard
+
+- Use the `Mouse Pad` tab after connecting to move the Windows pointer from Android.
+- BLE mouse movement is treated as realtime input, so stale movement is dropped instead of blocking later input.
+- The keyboard tab receives focus and IME input, but typed characters are not rendered in the Android input field.
+- Keyboard text is split into compact messages and executed on Windows through Unicode `SendInput`.
 
 ## USB Connection
 

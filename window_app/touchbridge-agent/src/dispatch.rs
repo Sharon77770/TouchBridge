@@ -1,5 +1,5 @@
 use crate::config::SharedAppState;
-use crate::event::TouchEvent;
+use crate::event::{TouchEvent, encode_compact_field, parse_compact_event};
 use crate::i18n::{self, TextKey};
 use crate::input;
 
@@ -23,13 +23,12 @@ impl CommandAck {
         }
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::json!({
-            "type": "ack",
-            "ok": self.ok,
-            "message": self.message,
-        })
-        .to_string()
+    pub fn to_compact(&self) -> String {
+        if self.ok {
+            "A1".to_string()
+        } else {
+            format!("A0:{}", encode_compact_field(&self.message))
+        }
     }
 }
 
@@ -44,13 +43,15 @@ pub fn handle_raw_message(raw: &str, transport: &str, state: &SharedAppState) ->
         return CommandAck::failed(i18n::invalid_request(language, "empty request"));
     }
 
-    match serde_json::from_str::<TouchEvent>(raw) {
+    match parse_compact_event(raw) {
         Ok(event) => {
-            println!("{transport} request: {raw}");
+            if !event.is_realtime_input() {
+                println!("{transport} request: {raw}");
+            }
             handle_event(raw, event, state)
         }
         Err(err) => {
-            eprintln!("Invalid event JSON: {err}; raw={raw}");
+            eprintln!("Invalid compact event: {err}; raw={raw}");
 
             let mut state = state.write().expect("app state poisoned");
             state.last_request = raw.to_string();
@@ -63,6 +64,7 @@ pub fn handle_raw_message(raw: &str, transport: &str, state: &SharedAppState) ->
 }
 
 fn handle_event(raw: &str, event: TouchEvent, state: &SharedAppState) -> CommandAck {
+    let realtime_input = event.is_realtime_input();
     let language = {
         let state = state.read().expect("app state poisoned");
         state.config.language
@@ -76,9 +78,26 @@ fn handle_event(raw: &str, event: TouchEvent, state: &SharedAppState) -> Command
             state.last_error = None;
             return CommandAck::executed();
         }
-        TouchEvent::CustomButtonSync { buttons, .. } => {
+        TouchEvent::CustomButtonSyncBegin { .. } => {
             let mut state = state.write().expect("app state poisoned");
-            state.config.sync_custom_buttons(buttons);
+            state.pending_custom_buttons.clear();
+            state.last_request = raw.to_string();
+            state.last_action = event.summary();
+            state.last_error = None;
+            return CommandAck::executed();
+        }
+        TouchEvent::CustomButtonSyncItem { button, .. } => {
+            let mut state = state.write().expect("app state poisoned");
+            state.pending_custom_buttons.push(button.clone());
+            state.last_request = raw.to_string();
+            state.last_action = event.summary();
+            state.last_error = None;
+            return CommandAck::executed();
+        }
+        TouchEvent::CustomButtonSyncEnd { .. } => {
+            let mut state = state.write().expect("app state poisoned");
+            let buttons = std::mem::take(&mut state.pending_custom_buttons);
+            state.config.sync_custom_buttons(&buttons);
             state.last_request = raw.to_string();
             state.last_action = match language {
                 crate::i18n::AppLanguage::English => {
@@ -95,7 +114,7 @@ fn handle_event(raw: &str, event: TouchEvent, state: &SharedAppState) -> Command
     }
 
     let result = match &event {
-        TouchEvent::Gesture { name } | TouchEvent::GestureEvent { gesture: name, .. } => {
+        TouchEvent::GestureEvent { gesture: name, .. } => {
             let action = {
                 let state = state.read().expect("app state poisoned");
                 state.config.action_for(*name)
@@ -114,10 +133,22 @@ fn handle_event(raw: &str, event: TouchEvent, state: &SharedAppState) -> Command
             input::send_action(&action).map(|_| action.summary_for(language))
         }
         _ => {
-            println!("Action: {}", event.summary());
+            if !realtime_input {
+                println!("Action: {}", event.summary());
+            }
             input::send_event(&event).map(|_| event.summary())
         }
     };
+
+    if realtime_input {
+        return match result {
+            Ok(_) => CommandAck::executed(),
+            Err(err) => {
+                eprintln!("Failed to send realtime Windows input: {err}");
+                CommandAck::failed(i18n::input_failed(language, err))
+            }
+        };
+    }
 
     let mut state = state.write().expect("app state poisoned");
     state.last_request = raw.to_string();

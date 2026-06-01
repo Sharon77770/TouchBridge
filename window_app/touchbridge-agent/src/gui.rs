@@ -245,6 +245,17 @@ impl TouchBridgeGui {
         }
     }
 
+    fn request_full_exit(&mut self, ctx: &egui::Context) {
+        self.allow_exit = true;
+        self.tray.request_exit();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn hide_to_background(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
     fn configure_fonts(&mut self, ctx: &egui::Context) {
         if self.fonts_configured {
             return;
@@ -286,17 +297,12 @@ impl eframe::App for TouchBridgeGui {
         ctx.request_repaint_after(Duration::from_millis(250));
 
         if self.tray.take_exit_requested() {
-            self.allow_exit = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.request_full_exit(ctx);
             return;
         }
 
-        if ctx.input(|input| input.viewport().close_requested())
-            && !self.allow_exit
-            && self.tray.is_available()
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_exit {
+            self.hide_to_background(ctx);
         }
 
         if self.tray.take_show_requested() {
@@ -344,6 +350,10 @@ impl eframe::App for TouchBridgeGui {
                     .clicked()
                 {
                     self.reset_to_defaults();
+                }
+
+                if ui.button(i18n::text(language, TextKey::Exit)).clicked() {
+                    self.request_full_exit(ctx);
                 }
 
                 ui.label(&self.save_status);
