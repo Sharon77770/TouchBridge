@@ -13,7 +13,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::core::{Error, HRESULT, Result};
 
 use crate::action::{Action, KeyCode, ensure_python_runtime_available};
-use crate::event::{KeyboardRemoteKey, MouseButton, MouseButtonAction, TouchEvent};
+use crate::event::{MouseButton, MouseButtonAction, TouchEvent};
 
 const INPUT_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const KEYBOARD_TEXT_INPUT_BATCH_UNITS: usize = 32;
@@ -58,7 +58,7 @@ fn send_event_inner(event: &TouchEvent) -> Result<()> {
             send_mouse_button(button, matches!(action, MouseButtonAction::Down))
         }
         TouchEvent::KeyboardText { text, .. } => send_keyboard_text(text),
-        TouchEvent::KeyboardKey { key, .. } => send_keyboard_remote_key(key),
+        TouchEvent::KeyboardKey { key, modifiers, .. } => send_keyboard_remote_key(key, modifiers),
         TouchEvent::GestureEvent { .. }
         | TouchEvent::Handshake { .. }
         | TouchEvent::CustomButtonSyncBegin { .. }
@@ -215,13 +215,22 @@ fn send_keyboard_text(text: &str) -> Result<()> {
     send_inputs(&inputs)
 }
 
-fn send_keyboard_remote_key(key: &KeyboardRemoteKey) -> Result<()> {
-    let key_code = match key {
-        KeyboardRemoteKey::Backspace => KeyCode::Backspace,
-        KeyboardRemoteKey::Enter => KeyCode::Enter,
-    };
+fn send_keyboard_remote_key(key: &KeyCode, modifiers: &[KeyCode]) -> Result<()> {
+    let mut keys = Vec::with_capacity(modifiers.len() + 1);
 
-    send_key_press(key_code)
+    for modifier in modifiers {
+        if *modifier != *key && !keys.contains(modifier) {
+            keys.push(*modifier);
+        }
+    }
+
+    keys.push(*key);
+
+    if keys.len() == 1 {
+        send_key_press(*key)
+    } else {
+        send_hotkey_keys(&keys)
+    }
 }
 
 fn send_key_press(key: KeyCode) -> Result<()> {
@@ -259,6 +268,11 @@ fn scan_code(key: KeyCode) -> (u16, bool) {
         KeyCode::Space => (0x39, false),
         KeyCode::Backspace => (0x0E, false),
         KeyCode::Delete => (0x53, true),
+        KeyCode::Insert => (0x52, true),
+        KeyCode::Home => (0x47, true),
+        KeyCode::End => (0x4F, true),
+        KeyCode::PageUp => (0x49, true),
+        KeyCode::PageDown => (0x51, true),
         KeyCode::Left => (0x4B, true),
         KeyCode::Right => (0x4D, true),
         KeyCode::Up => (0x48, true),

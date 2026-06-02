@@ -47,6 +47,7 @@
     <string name="mouse_sensitivity">감도</string>
     <string name="mouse_left_click">왼쪽 클릭</string>
     <string name="mouse_right_click">오른쪽 클릭</string>
+    <string name="mouse_text_selection">텍스트 선택</string>
     <string name="touch_pad_short">패드</string>
     <string name="custom_buttons_body">연결된 Windows Agent로 이름 있는 커스텀 버튼 신호를 전송합니다.</string>
     <string name="empty_custom_buttons">아직 커스텀 버튼이 없습니다.</string>

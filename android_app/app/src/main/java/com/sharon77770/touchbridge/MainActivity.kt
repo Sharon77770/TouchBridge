@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -78,16 +79,24 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -119,6 +128,7 @@ private const val MOUSE_PAD_MAX_SENSITIVITY = 3f
 private const val MOUSE_PAD_SCROLL_MULTIPLIER = 1.5f
 private const val KEYBOARD_REMOTE_SHADOW_CODE_POINT_LIMIT = 256
 private const val KEYBOARD_REMOTE_TEXT_EVENT_CHUNK_CODE_POINTS = 32
+private const val KEYBOARD_REMOTE_SENTINEL = "\u200B"
 
 private object BleMouseDeltaConfig {
     const val TRANSMIT_TICK_MS = 6L
@@ -1415,15 +1425,55 @@ private fun GesturePadScreen(
     onBack: () -> Unit,
     onAppSettingsClick: () -> Unit,
 ) {
-    BackHandler(onBack = onBack)
     var padMode by rememberSaveable { mutableStateOf(GesturePadMode.GesturePad) }
+    var keyboardInputActive by rememberSaveable { mutableStateOf(false) }
+    var keyboardActiveModifiers by remember { mutableStateOf(emptySet<TouchBridgeKeyboardModifier>()) }
+    val showKeyboardAccessoryBar = padMode == GesturePadMode.Keyboard && keyboardInputActive
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    fun dispatchKeyboardAccessoryKey(key: KeyboardAccessoryKeyDefinition) {
+        if (key.type == KeyboardAccessoryKeyType.Modifier) {
+            val modifier = key.modifiers.firstOrNull() ?: return
+            keyboardActiveModifiers = if (modifier in keyboardActiveModifiers) {
+                keyboardActiveModifiers - modifier
+            } else {
+                keyboardActiveModifiers + modifier
+            }
+            return
+        }
+
+        onKeyboardRemoteEvent(
+            KeyboardRemoteEvent.KeyPress(
+                key = key.keyCode,
+                seq = nextKeyboardSequence(),
+                modifiers = keyboardActiveModifiers + key.modifiers,
+            ),
+        )
+        keyboardActiveModifiers = emptySet()
+    }
+
+    BackHandler {
+        if (keyboardInputActive) {
+            keyboardInputActive = false
+            keyboardActiveModifiers = emptySet()
+        } else {
+            onBack()
+        }
+    }
+
+    LaunchedEffect(padMode) {
+        if (padMode != GesturePadMode.Keyboard) {
+            keyboardInputActive = false
+            keyboardActiveModifiers = emptySet()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
         GesturePadHeader(
             device = device,
             mode = padMode,
@@ -1475,18 +1525,61 @@ private fun GesturePadScreen(
 
                 GesturePadMode.Keyboard -> {
                     KeyboardRemotePad(
-                        onKeyboardEvent = onKeyboardRemoteEvent,
+                        onKeyboardEvent = { event ->
+                            onKeyboardRemoteEvent(event)
+                            keyboardActiveModifiers = emptySet()
+                        },
                         nextSequence = nextKeyboardSequence,
+                        onInputActiveChange = { active ->
+                            keyboardInputActive = active
+                            if (!active) {
+                                keyboardActiveModifiers = emptySet()
+                            }
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
         }
 
-        TouchBridgeNavigationBar(
-            mode = padMode,
-            onModeChange = { padMode = it },
-        )
+        if (showKeyboardAccessoryBar) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp),
+            ) {
+            }
+        } else {
+            TouchBridgeNavigationBar(
+                mode = padMode,
+                onModeChange = { padMode = it },
+            )
+        }
+    }
+
+        if (showKeyboardAccessoryBar) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    KeyboardAccessoryBar(
+                        keys = KeyboardAccessoryKeys.allKeys,
+                        activeModifiers = keyboardActiveModifiers,
+                        onKeyClick = ::dispatchKeyboardAccessoryKey,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1531,6 +1624,27 @@ private fun MousePad(
     onMouseEvent: (MousePadEvent) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val textSelectionEnabledState = remember { mutableStateOf(false) }
+    val textSelectionEnabled = textSelectionEnabledState.value
+
+    fun setTextSelectionEnabled(enabled: Boolean) {
+        if (textSelectionEnabledState.value == enabled) {
+            return
+        }
+
+        textSelectionEnabledState.value = enabled
+        onMouseEvent(leftMouseButtonEvent(isDown = enabled))
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (textSelectionEnabledState.value) {
+                textSelectionEnabledState.value = false
+                onMouseEvent(leftMouseButtonEvent(isDown = false))
+            }
+        }
+    }
+
     Box(
         modifier = modifier,
     ) {
@@ -1539,7 +1653,7 @@ private fun MousePad(
                 .fillMaxSize()
                 .heightIn(min = 320.dp)
                 .border(2.dp, AppBlue.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
-                .pointerInput(sensitivity, onMouseEvent) {
+                .pointerInput(sensitivity, textSelectionEnabled, onMouseEvent) {
                     awaitEachGesture {
                         val firstDown = awaitFirstDown(requireUnconsumed = false)
                         val longPressTimeout = viewConfiguration.longPressTimeoutMillis
@@ -1611,6 +1725,7 @@ private fun MousePad(
                                     maxPointerCount == 1 -> {
                                         if (
                                             !dragging &&
+                                            !textSelectionEnabled &&
                                             upTime - firstDown.uptimeMillis >= longPressTimeout &&
                                             wasWithinTapSlop
                                         ) {
@@ -1643,7 +1758,11 @@ private fun MousePad(
                                     action = TouchBridgeMouseButtonAction.Up,
                                 ),
                             )
-                        } else if (maxPointerTravel <= tapSlop && duration < longPressTimeout) {
+                        } else if (
+                            !textSelectionEnabled &&
+                            maxPointerTravel <= tapSlop &&
+                            duration < longPressTimeout
+                        ) {
                             when (maxPointerCount) {
                                 1 -> onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Left))
                                 2 -> onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Right))
@@ -1681,6 +1800,8 @@ private fun MousePad(
         MousePadControls(
             sensitivity = sensitivity,
             onSensitivityChange = onSensitivityChange,
+            textSelectionEnabled = textSelectionEnabled,
+            onTextSelectionChange = ::setTextSelectionEnabled,
             onMouseEvent = onMouseEvent,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1693,6 +1814,8 @@ private fun MousePad(
 private fun MousePadControls(
     sensitivity: Float,
     onSensitivityChange: (Float) -> Unit,
+    textSelectionEnabled: Boolean,
+    onTextSelectionChange: (Boolean) -> Unit,
     onMouseEvent: (MousePadEvent) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1735,11 +1858,33 @@ private fun MousePadControls(
             }
 
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.mouse_text_selection),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Switch(
+                    checked = textSelectionEnabled,
+                    onCheckedChange = onTextSelectionChange,
+                )
+            }
+
+            Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 OutlinedButton(
                     onClick = { onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Left)) },
+                    enabled = !textSelectionEnabled,
                     modifier = Modifier
                         .weight(1f)
                         .height(34.dp),
@@ -1753,6 +1898,7 @@ private fun MousePadControls(
                 }
                 OutlinedButton(
                     onClick = { onMouseEvent(MousePadEvent.Click(TouchBridgeMouseButton.Right)) },
+                    enabled = !textSelectionEnabled,
                     modifier = Modifier
                         .weight(1f)
                         .height(34.dp),
@@ -1769,17 +1915,45 @@ private fun MousePadControls(
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun KeyboardRemotePad(
     onKeyboardEvent: (KeyboardRemoteEvent) -> Unit,
     nextSequence: () -> Long,
+    onInputActiveChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var inputText by remember { mutableStateOf("") }
+    var inputValue by remember {
+        mutableStateOf(keyboardRemoteTextFieldValue(""))
+    }
+    var sentInputText by remember {
+        mutableStateOf(keyboardRemoteTextFieldValue("").text)
+    }
+    var inputFocused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        onInputActiveChange(true)
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            onInputActiveChange(false)
+        }
+    }
+
+    BackHandler(enabled = inputFocused) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        onInputActiveChange(false)
+    }
 
     Surface(
         modifier = modifier
-            .heightIn(min = 320.dp)
             .border(2.dp, AppGreen.copy(alpha = 0.72f), RoundedCornerShape(8.dp)),
         shape = RoundedCornerShape(8.dp),
         color = AppSurfaceHigh,
@@ -1787,6 +1961,10 @@ private fun KeyboardRemotePad(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .clickable {
+                    focusRequester.requestFocus()
+                    keyboardController?.show()
+                }
                 .background(
                     Brush.radialGradient(
                         colors = listOf(
@@ -1800,17 +1978,25 @@ private fun KeyboardRemotePad(
         ) {
             GesturePadBoundaryChrome(color = AppGreen)
             OutlinedTextField(
-                value = inputText,
-                onValueChange = { nextText ->
-                    val events = keyboardRemoteEventsForTextChange(
-                        previous = inputText,
-                        next = nextText,
+                value = inputValue,
+                onValueChange = { nextValue ->
+                    val normalizedValue = keyboardRemoteTextFieldValue(nextValue)
+                    val events = keyboardRemoteEventsForImeChange(
+                        previousRaw = sentInputText,
+                        nextValue = normalizedValue,
                         nextSequence = nextSequence,
                     )
-                    inputText = boundedKeyboardShadowText(nextText)
+                    inputValue = normalizedValue
+                    sentInputText = normalizedValue.text
                     events.forEach(onKeyboardEvent)
                 },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { focusState ->
+                        inputFocused = focusState.isFocused
+                        onInputActiveChange(focusState.isFocused)
+                    },
                 label = { Text(stringResource(R.string.keyboard_remote_input)) },
                 singleLine = false,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color.Transparent),
@@ -1821,6 +2007,64 @@ private fun KeyboardRemotePad(
                 ),
                 shape = RoundedCornerShape(8.dp),
             )
+        }
+    }
+}
+
+@Composable
+private fun KeyboardAccessoryBar(
+    keys: List<KeyboardAccessoryKeyDefinition>,
+    activeModifiers: Set<TouchBridgeKeyboardModifier>,
+    onKeyClick: (KeyboardAccessoryKeyDefinition) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(8.dp),
+        color = AppSurface.copy(alpha = 0.96f),
+        border = BorderStroke(1.dp, AppOutline),
+    ) {
+        Row(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            keys.forEach { key ->
+                val active = key.type == KeyboardAccessoryKeyType.Modifier &&
+                    key.modifiers.any { it in activeModifiers }
+                val containerColor = when {
+                    active -> AppGreen
+                    key.type == KeyboardAccessoryKeyType.Shortcut -> AppSurfaceHigh
+                    else -> AppSurface
+                }
+                val contentColor = if (active) {
+                    Color(0xFF07111D)
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                }
+
+                Button(
+                    onClick = { onKeyClick(key) },
+                    modifier = Modifier
+                        .height(34.dp)
+                        .widthIn(min = 42.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = containerColor,
+                        contentColor = contentColor,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                ) {
+                    Text(
+                        text = key.displayLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
     }
 }
@@ -2901,6 +3145,85 @@ private fun nextBleMouseSeq(current: Long): Long {
 
 private fun nextKeyboardSeq(current: Long): Long {
     return if (current == Long.MAX_VALUE) 1L else current + 1L
+}
+
+private fun leftMouseButtonEvent(isDown: Boolean): MousePadEvent.Button {
+    return MousePadEvent.Button(
+        button = TouchBridgeMouseButton.Left,
+        action = if (isDown) {
+            TouchBridgeMouseButtonAction.Down
+        } else {
+            TouchBridgeMouseButtonAction.Up
+        },
+    )
+}
+
+internal fun keyboardRemoteTextFieldValue(
+    rawText: String,
+    composition: TextRange? = null,
+): TextFieldValue {
+    val text = KEYBOARD_REMOTE_SENTINEL + boundedKeyboardShadowText(keyboardRemoteShadowText(rawText))
+    val adjustedComposition = composition?.let { range ->
+        TextRange(
+            start = (range.start + KEYBOARD_REMOTE_SENTINEL.length).coerceIn(0, text.length),
+            end = (range.end + KEYBOARD_REMOTE_SENTINEL.length).coerceIn(0, text.length),
+        )
+    }
+    return TextFieldValue(
+        text = text,
+        selection = TextRange(text.length),
+        composition = adjustedComposition,
+    )
+}
+
+internal fun keyboardRemoteTextFieldValue(value: TextFieldValue): TextFieldValue {
+    val normalizedValue = keyboardRemoteTextFieldValue(value.text)
+    val composition = value.composition?.takeIf { value.text == normalizedValue.text }
+    return TextFieldValue(
+        text = normalizedValue.text,
+        selection = TextRange(normalizedValue.text.length),
+        composition = composition,
+    )
+}
+
+internal fun keyboardRemoteEventsForImeChange(
+    previousRaw: String,
+    nextRaw: String,
+    nextSequence: () -> Long,
+): List<KeyboardRemoteEvent> {
+    return keyboardRemoteEventsForImeChange(
+        previousRaw = previousRaw,
+        nextValue = TextFieldValue(nextRaw),
+        nextSequence = nextSequence,
+    )
+}
+
+internal fun keyboardRemoteEventsForImeChange(
+    previousRaw: String,
+    nextValue: TextFieldValue,
+    nextSequence: () -> Long,
+): List<KeyboardRemoteEvent> {
+    val previous = keyboardRemoteShadowText(previousRaw)
+    val next = keyboardRemoteShadowText(nextValue.text)
+
+    if (previous.isEmpty() && next.isEmpty() && !nextValue.text.contains(KEYBOARD_REMOTE_SENTINEL)) {
+        return listOf(
+            KeyboardRemoteEvent.KeyPress(
+                key = TouchBridgeKeyboardKey.Backspace,
+                seq = nextSequence(),
+            ),
+        )
+    }
+
+    return keyboardRemoteEventsForTextChange(
+        previous = previous,
+        next = next,
+        nextSequence = nextSequence,
+    )
+}
+
+private fun keyboardRemoteShadowText(rawText: String): String {
+    return rawText.replace(KEYBOARD_REMOTE_SENTINEL, "")
 }
 
 private fun keyboardRemoteEventsForTextChange(

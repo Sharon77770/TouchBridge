@@ -47,6 +47,7 @@
     <string name="mouse_sensitivity">Sensitivity</string>
     <string name="mouse_left_click">Left click</string>
     <string name="mouse_right_click">Right click</string>
+    <string name="mouse_text_selection">Text select</string>
     <string name="touch_pad_short">Pad</string>
     <string name="custom_buttons_body">Send named custom button signals to the connected Windows Agent.</string>
     <string name="empty_custom_buttons">No custom buttons yet.</string>

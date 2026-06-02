@@ -40,6 +40,7 @@ sealed class KeyboardRemoteEvent {
     data class KeyPress(
         val key: TouchBridgeKeyboardKey,
         val seq: Long,
+        val modifiers: Set<TouchBridgeKeyboardModifier> = emptySet(),
     ) : KeyboardRemoteEvent()
 }
 
@@ -56,6 +57,67 @@ enum class TouchBridgeMouseButtonAction(val wireName: String) {
 enum class TouchBridgeKeyboardKey(val wireName: String) {
     Backspace("backspace"),
     Enter("enter"),
+    Escape("escape"),
+    Tab("tab"),
+    Control("control"),
+    Alt("alt"),
+    Shift("shift"),
+    Win("win"),
+    ArrowLeft("arrow_left"),
+    ArrowRight("arrow_right"),
+    ArrowUp("arrow_up"),
+    ArrowDown("arrow_down"),
+    Delete("delete"),
+    Insert("insert"),
+    Home("home"),
+    End("end"),
+    PageUp("page_up"),
+    PageDown("page_down"),
+    F1("f1"),
+    F2("f2"),
+    F3("f3"),
+    F4("f4"),
+    F5("f5"),
+    F6("f6"),
+    F7("f7"),
+    F8("f8"),
+    F9("f9"),
+    F10("f10"),
+    F11("f11"),
+    F12("f12"),
+    A("a"),
+    B("b"),
+    C("c"),
+    D("d"),
+    E("e"),
+    F("f"),
+    G("g"),
+    H("h"),
+    I("i"),
+    J("j"),
+    K("k"),
+    L("l"),
+    M("m"),
+    N("n"),
+    O("o"),
+    P("p"),
+    Q("q"),
+    R("r"),
+    S("s"),
+    T("t"),
+    U("u"),
+    V("v"),
+    W("w"),
+    X("x"),
+    Y("y"),
+    Z("z"),
+}
+
+enum class TouchBridgeKeyboardModifier(val wireName: String) {
+    Control("control"),
+    Alt("alt"),
+    Shift("shift"),
+    Win("win"),
 }
 
 fun GestureEvent.toProtocolMessage(): String {
@@ -96,7 +158,11 @@ fun MousePadEvent.toProtocolMessages(): List<String> {
 fun KeyboardRemoteEvent.toProtocolMessages(): List<String> {
     return when (this) {
         is KeyboardRemoteEvent.TextInput -> compactKeyboardTextMessages(seq, text)
-        is KeyboardRemoteEvent.KeyPress -> listOf("K:${seq.toCompactString()}:${key.compactCode()}")
+        is KeyboardRemoteEvent.KeyPress -> {
+            val base = "K:${seq.toCompactString()}:${key.compactCode()}"
+            val modifierPart = modifiers.compactCode()
+            listOf(if (modifierPart.isEmpty()) base else "$base:$modifierPart")
+        }
     }
 }
 
@@ -191,7 +257,81 @@ private fun TouchBridgeKeyboardKey.compactCode(): String {
     return when (this) {
         TouchBridgeKeyboardKey.Backspace -> "B"
         TouchBridgeKeyboardKey.Enter -> "E"
+        TouchBridgeKeyboardKey.Escape -> "Esc"
+        TouchBridgeKeyboardKey.Tab -> "Tab"
+        TouchBridgeKeyboardKey.Control -> "Ctrl"
+        TouchBridgeKeyboardKey.Alt -> "Alt"
+        TouchBridgeKeyboardKey.Shift -> "Shift"
+        TouchBridgeKeyboardKey.Win -> "Win"
+        TouchBridgeKeyboardKey.ArrowLeft -> "Left"
+        TouchBridgeKeyboardKey.ArrowRight -> "Right"
+        TouchBridgeKeyboardKey.ArrowUp -> "Up"
+        TouchBridgeKeyboardKey.ArrowDown -> "Down"
+        TouchBridgeKeyboardKey.Delete -> "Del"
+        TouchBridgeKeyboardKey.Insert -> "Ins"
+        TouchBridgeKeyboardKey.Home -> "Home"
+        TouchBridgeKeyboardKey.End -> "End"
+        TouchBridgeKeyboardKey.PageUp -> "PgUp"
+        TouchBridgeKeyboardKey.PageDown -> "PgDn"
+        TouchBridgeKeyboardKey.F1 -> "F1"
+        TouchBridgeKeyboardKey.F2 -> "F2"
+        TouchBridgeKeyboardKey.F3 -> "F3"
+        TouchBridgeKeyboardKey.F4 -> "F4"
+        TouchBridgeKeyboardKey.F5 -> "F5"
+        TouchBridgeKeyboardKey.F6 -> "F6"
+        TouchBridgeKeyboardKey.F7 -> "F7"
+        TouchBridgeKeyboardKey.F8 -> "F8"
+        TouchBridgeKeyboardKey.F9 -> "F9"
+        TouchBridgeKeyboardKey.F10 -> "F10"
+        TouchBridgeKeyboardKey.F11 -> "F11"
+        TouchBridgeKeyboardKey.F12 -> "F12"
+        TouchBridgeKeyboardKey.A -> "KeyA"
+        TouchBridgeKeyboardKey.B -> "KeyB"
+        TouchBridgeKeyboardKey.C -> "KeyC"
+        TouchBridgeKeyboardKey.D -> "KeyD"
+        TouchBridgeKeyboardKey.E -> "KeyE"
+        TouchBridgeKeyboardKey.F -> "KeyF"
+        TouchBridgeKeyboardKey.G -> "KeyG"
+        TouchBridgeKeyboardKey.H -> "KeyH"
+        TouchBridgeKeyboardKey.I -> "KeyI"
+        TouchBridgeKeyboardKey.J -> "KeyJ"
+        TouchBridgeKeyboardKey.K -> "KeyK"
+        TouchBridgeKeyboardKey.L -> "KeyL"
+        TouchBridgeKeyboardKey.M -> "KeyM"
+        TouchBridgeKeyboardKey.N -> "KeyN"
+        TouchBridgeKeyboardKey.O -> "KeyO"
+        TouchBridgeKeyboardKey.P -> "KeyP"
+        TouchBridgeKeyboardKey.Q -> "KeyQ"
+        TouchBridgeKeyboardKey.R -> "KeyR"
+        TouchBridgeKeyboardKey.S -> "KeyS"
+        TouchBridgeKeyboardKey.T -> "KeyT"
+        TouchBridgeKeyboardKey.U -> "KeyU"
+        TouchBridgeKeyboardKey.V -> "KeyV"
+        TouchBridgeKeyboardKey.W -> "KeyW"
+        TouchBridgeKeyboardKey.X -> "KeyX"
+        TouchBridgeKeyboardKey.Y -> "KeyY"
+        TouchBridgeKeyboardKey.Z -> "KeyZ"
     }
+}
+
+private fun TouchBridgeKeyboardModifier.compactCode(): String {
+    return when (this) {
+        TouchBridgeKeyboardModifier.Control -> "C"
+        TouchBridgeKeyboardModifier.Alt -> "A"
+        TouchBridgeKeyboardModifier.Shift -> "S"
+        TouchBridgeKeyboardModifier.Win -> "W"
+    }
+}
+
+private fun Set<TouchBridgeKeyboardModifier>.compactCode(): String {
+    return listOf(
+        TouchBridgeKeyboardModifier.Control,
+        TouchBridgeKeyboardModifier.Alt,
+        TouchBridgeKeyboardModifier.Shift,
+        TouchBridgeKeyboardModifier.Win,
+    )
+        .filter { contains(it) }
+        .joinToString(separator = "") { it.compactCode() }
 }
 
 private fun Int.toCompactString(): String = toString(36)

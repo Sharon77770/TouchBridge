@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::action::{KeyCode, keys_to_text};
 use crate::i18n::AppLanguage;
 
 #[derive(Debug)]
@@ -30,7 +31,8 @@ pub enum TouchEvent {
     },
     KeyboardKey {
         device_id: Option<String>,
-        key: KeyboardRemoteKey,
+        key: KeyCode,
+        modifiers: Vec<KeyCode>,
         seq: Option<u64>,
         timestamp: Option<u64>,
     },
@@ -79,12 +81,6 @@ pub enum MouseButton {
 pub enum MouseButtonAction {
     Down,
     Up,
-}
-
-#[derive(Debug)]
-pub enum KeyboardRemoteKey {
-    Backspace,
-    Enter,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +144,7 @@ pub fn parse_compact_event(raw: &str) -> std::result::Result<TouchEvent, String>
             device_id: None,
             seq: Some(parse_compact_u64(require_field(&fields, 1, "seq")?)?),
             key: parse_keyboard_key(require_field(&fields, 2, "key")?)?,
+            modifiers: parse_keyboard_modifiers(fields.get(3).copied().unwrap_or_default())?,
             timestamp: None,
         }),
         "Y" => Ok(TouchEvent::CustomButtonEvent {
@@ -224,15 +221,19 @@ impl TouchEvent {
             TouchEvent::KeyboardKey {
                 device_id,
                 key,
+                modifiers,
                 seq,
                 timestamp,
             } => {
-                let key = match key {
-                    KeyboardRemoteKey::Backspace => "backspace",
-                    KeyboardRemoteKey::Enter => "enter",
+                let keys = if modifiers.is_empty() {
+                    key.label().to_string()
+                } else {
+                    let mut keys = modifiers.clone();
+                    keys.push(*key);
+                    keys_to_text(&keys)
                 };
                 format!(
-                    "keyboard_key device_id={}, key={key}, seq={}, timestamp={}",
+                    "keyboard_key device_id={}, key={keys}, seq={}, timestamp={}",
                     device_id.as_deref().unwrap_or("unknown"),
                     optional_u64(seq),
                     optional_u64(timestamp)
@@ -493,12 +494,32 @@ fn parse_mouse_button_action(value: &str) -> std::result::Result<MouseButtonActi
     }
 }
 
-fn parse_keyboard_key(value: &str) -> std::result::Result<KeyboardRemoteKey, String> {
+fn parse_keyboard_key(value: &str) -> std::result::Result<KeyCode, String> {
     match value {
-        "B" | "b" => Ok(KeyboardRemoteKey::Backspace),
-        "E" | "e" => Ok(KeyboardRemoteKey::Enter),
-        _ => Err(format!("unknown keyboard key: {value}")),
+        "B" | "b" => Ok(KeyCode::Backspace),
+        "E" | "e" => Ok(KeyCode::Enter),
+        other => KeyCode::from_token(other).ok_or_else(|| format!("unknown keyboard key: {value}")),
     }
+}
+
+fn parse_keyboard_modifiers(value: &str) -> std::result::Result<Vec<KeyCode>, String> {
+    let mut modifiers = Vec::new();
+
+    for char in value.chars() {
+        let modifier = match char {
+            'C' | 'c' => KeyCode::Ctrl,
+            'A' | 'a' => KeyCode::Alt,
+            'S' | 's' => KeyCode::Shift,
+            'W' | 'w' => KeyCode::Win,
+            _ => return Err(format!("unknown keyboard modifier: {char}")),
+        };
+
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
+
+    Ok(modifiers)
 }
 
 fn require_field<'a>(
@@ -596,3 +617,53 @@ fn optional_u64(value: &Option<u64>) -> String {
 const HEX_DIGITS: [char; 16] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_keyboard_key_without_modifiers() {
+        match parse_compact_event("K:1:Left").expect("event") {
+            TouchEvent::KeyboardKey {
+                key,
+                modifiers,
+                seq,
+                ..
+            } => {
+                assert_eq!(key, KeyCode::Left);
+                assert!(modifiers.is_empty());
+                assert_eq!(seq, Some(1));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_keyboard_key_with_modifiers() {
+        match parse_compact_event("K:2:KeyC:C").expect("event") {
+            TouchEvent::KeyboardKey {
+                key,
+                modifiers,
+                seq,
+                ..
+            } => {
+                assert_eq!(key, KeyCode::C);
+                assert_eq!(modifiers, vec![KeyCode::Ctrl]);
+                assert_eq!(seq, Some(2));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_multiple_keyboard_modifiers_in_payload_order() {
+        match parse_compact_event("K:3:Right:CSW").expect("event") {
+            TouchEvent::KeyboardKey { key, modifiers, .. } => {
+                assert_eq!(key, KeyCode::Right);
+                assert_eq!(modifiers, vec![KeyCode::Ctrl, KeyCode::Shift, KeyCode::Win]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+}
