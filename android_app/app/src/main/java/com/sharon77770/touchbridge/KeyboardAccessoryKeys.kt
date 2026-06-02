@@ -36,6 +36,7 @@ object KeyboardAccessoryKeys {
                 modifier("Ctrl", TouchBridgeKeyboardKey.Control, TouchBridgeKeyboardModifier.Control),
                 modifier("Alt", TouchBridgeKeyboardKey.Alt, TouchBridgeKeyboardModifier.Alt),
                 modifier("Shift", TouchBridgeKeyboardKey.Shift, TouchBridgeKeyboardModifier.Shift),
+                normal("Bksp", TouchBridgeKeyboardKey.Backspace, "Backspace"),
                 modifier("Win", TouchBridgeKeyboardKey.Win, TouchBridgeKeyboardModifier.Win),
                 normal("←", TouchBridgeKeyboardKey.ArrowLeft, "ArrowLeft"),
                 normal("↑", TouchBridgeKeyboardKey.ArrowUp, "ArrowUp"),
