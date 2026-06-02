@@ -49,6 +49,8 @@ data class Device(
     val capabilities: DeviceCapabilities,
 )
 
+private const val BLE_DEVICE_ID_PREFIX = "ble-"
+
 fun initialTouchBridgeDevices(
     usbAttachmentState: UsbAttachmentState = UsbAttachmentState.CableDisconnected,
 ): List<Device> {
@@ -76,6 +78,23 @@ fun initialTouchBridgeDevices(
 }
 
 const val USB_DEVICE_ID = "usb-touchbridge-agent"
+
+fun bleDeviceId(address: String): String = "$BLE_DEVICE_ID_PREFIX$address"
+
+fun bleAddressFromDeviceId(id: String): String? {
+    return id
+        .takeIf { it.startsWith(BLE_DEVICE_ID_PREFIX) }
+        ?.removePrefix(BLE_DEVICE_ID_PREFIX)
+        ?.takeIf { it.isNotBlank() }
+}
+
+fun Device.bleAddressOrNull(): String? {
+    return if (transport == TransportType.Ble) {
+        bleAddressFromDeviceId(id)
+    } else {
+        null
+    }
+}
 
 fun bleDeviceFromScan(
     id: String,

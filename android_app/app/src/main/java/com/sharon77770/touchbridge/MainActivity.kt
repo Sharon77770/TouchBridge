@@ -230,7 +230,8 @@ private fun TouchBridgeAppContent(
 
     var devices by remember {
         mutableStateOf(
-            initialTouchBridgeDevices(
+            initialDevicesWithSavedBle(
+                context = context,
                 usbAttachmentState = connectionManager.usbAttachmentState(),
             ),
         )
@@ -532,12 +533,7 @@ private fun TouchBridgeAppContent(
                         return@fold
                     }
 
-                    devices = (devices.filter { existing ->
-                        scannedDevices.none { scanned -> scanned.id == existing.id }
-                    } + scannedDevices).sortedWith(
-                        compareBy<Device> { it.transport != TransportType.Usb }
-                            .thenBy { it.name },
-                    )
+                    devices = mergeScannedBleDevices(devices, scannedDevices)
                     showMessage(context.getString(R.string.ble_scan_found_format, scannedDevices.size))
                 },
                 onFailure = { throwable ->
@@ -578,9 +574,16 @@ private fun TouchBridgeAppContent(
         }
     }
 
-    fun updateDevice(deviceId: String, transform: (Device) -> Device) {
+    fun updateDevice(
+        deviceId: String,
+        persistSavedBleDevices: Boolean = false,
+        transform: (Device) -> Device,
+    ) {
         devices = devices.map { device ->
             if (device.id == deviceId) transform(device) else device
+        }
+        if (persistSavedBleDevices) {
+            saveSavedBleDevices(context, devices)
         }
     }
 
@@ -590,14 +593,6 @@ private fun TouchBridgeAppContent(
         if (device.transport == TransportType.Ble && !permissionsGranted) {
             onRequestPermissions()
             showMessage(context.getString(R.string.error_bluetooth_permission_required))
-            return
-        }
-
-        if (device.transport == TransportType.Ble && !device.available) {
-            updateDevice(deviceId) {
-                it.copy(connectionStatus = ConnectionStatus.Failed)
-            }
-            showMessage(context.getString(R.string.error_device_unavailable_format, device.name))
             return
         }
 
@@ -627,6 +622,7 @@ private fun TouchBridgeAppContent(
                             deviceId -> item.copy(
                                 paired = true,
                                 trusted = true,
+                                available = true,
                                 connectionStatus = ConnectionStatus.Connected,
                                 lastConnectedAt = System.currentTimeMillis(),
                             )
@@ -640,6 +636,7 @@ private fun TouchBridgeAppContent(
                             )
                         }
                     }
+                    saveSavedBleDevices(context, devices)
                     selectedDeviceId = deviceId
                     pairingDeviceId = null
                     gestureStatus = GestureSendStatus.Idle
@@ -845,7 +842,10 @@ private fun TouchBridgeAppContent(
                                     onRequestPermissions()
                                     showMessage(context.getString(R.string.error_bluetooth_permission_required))
                                 } else {
-                                    updateDevice(pairingDevice.id) {
+                                    updateDevice(
+                                        deviceId = pairingDevice.id,
+                                        persistSavedBleDevices = true,
+                                    ) {
                                         it.copy(paired = true, trusted = true)
                                     }
                                     startConnection(pairingDevice.id)
@@ -902,12 +902,18 @@ private fun TouchBridgeAppContent(
                 device = settingsDevice,
                 onDismiss = { settingsDeviceId = null },
                 onRename = { newName ->
-                    updateDevice(settingsDevice.id) {
+                    updateDevice(
+                        deviceId = settingsDevice.id,
+                        persistSavedBleDevices = true,
+                    ) {
                         it.copy(name = newName)
                     }
                 },
                 onAutoConnectChange = { enabled ->
-                    updateDevice(settingsDevice.id) {
+                    updateDevice(
+                        deviceId = settingsDevice.id,
+                        persistSavedBleDevices = true,
+                    ) {
                         it.copy(autoConnect = enabled)
                     }
                 },
@@ -923,7 +929,10 @@ private fun TouchBridgeAppContent(
                     settingsDeviceId = null
                 },
                 onRemoveTrust = {
-                    updateDevice(settingsDevice.id) {
+                    updateDevice(
+                        deviceId = settingsDevice.id,
+                        persistSavedBleDevices = true,
+                    ) {
                         it.copy(
                             paired = false,
                             trusted = false,
@@ -3009,7 +3018,8 @@ private fun localizedConnectionErrorMessage(context: Context, message: String?):
         message == "BLE scanner is unavailable" ->
             context.getString(R.string.error_ble_scanner_unavailable)
 
-        message == "TouchBridge BLE agent was not found" ->
+        message.startsWith("TouchBridge BLE agent") &&
+            message.endsWith("was not found") ->
             context.getString(R.string.error_ble_agent_not_found)
 
         message == "BLE characteristic write did not start" ->

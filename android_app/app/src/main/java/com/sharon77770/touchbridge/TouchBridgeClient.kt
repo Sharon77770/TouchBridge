@@ -60,6 +60,7 @@ open class TouchBridgeClient(
     private val requestIds = AtomicLong(0)
     private val sendMutex = Mutex()
     private var activeConnection: ActiveConnection? = null
+    private var preferredDeviceAddress: String? = null
     private var pendingWrite: CompletableDeferred<Int>? = null
     private var nextNoResponseWriteAtMs = 0L
 
@@ -86,7 +87,7 @@ open class TouchBridgeClient(
                     ?: "TouchBridge BLE Agent"
 
                 bleDeviceFromScan(
-                    id = "ble-$address",
+                    id = bleDeviceId(address),
                     name = name,
                 )
             }.onFailure { throwable ->
@@ -96,10 +97,22 @@ open class TouchBridgeClient(
     }
 
     @SuppressLint("MissingPermission")
-    open suspend fun connectToAgent(): Result<Unit> = sendMutex.withLock {
+    open suspend fun connectToAgent(deviceAddress: String? = null): Result<Unit> = sendMutex.withLock {
         withContext(Dispatchers.IO) {
             runCatching {
-                activeConnection ?: connect(requestIds.incrementAndGet()).also {
+                val normalizedDeviceAddress = deviceAddress?.trim()?.takeIf { it.isNotBlank() }
+                if (normalizedDeviceAddress != null) {
+                    preferredDeviceAddress = normalizedDeviceAddress
+                    val activeAddress = activeConnection?.deviceAddress
+                    if (activeAddress != null && !activeAddress.equals(normalizedDeviceAddress, ignoreCase = true)) {
+                        closeConnection()
+                    }
+                }
+
+                activeConnection ?: connect(
+                    requestId = requestIds.incrementAndGet(),
+                    targetDeviceAddress = preferredDeviceAddress,
+                ).also {
                     activeConnection = it
                 }
                 Unit
@@ -176,6 +189,7 @@ open class TouchBridgeClient(
     }
 
     fun close() {
+        preferredDeviceAddress = null
         closeConnection()
     }
 
@@ -184,7 +198,10 @@ open class TouchBridgeClient(
         requestId: Long,
         allowLossyNoResponse: Boolean,
     ) {
-        val connection = activeConnection ?: connect(requestId).also {
+        val connection = activeConnection ?: connect(
+            requestId = requestId,
+            targetDeviceAddress = preferredDeviceAddress,
+        ).also {
             activeConnection = it
         }
 
@@ -270,7 +287,7 @@ open class TouchBridgeClient(
                 connection.characteristic,
                 payload,
                 writeType,
-            ) == BluetoothStatusCodes.SUCCESS
+            ) == android.bluetooth.BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             connection.characteristic.value = payload
@@ -280,7 +297,10 @@ open class TouchBridgeClient(
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun connect(requestId: Long): ActiveConnection {
+    private suspend fun connect(
+        requestId: Long,
+        targetDeviceAddress: String? = preferredDeviceAddress,
+    ): ActiveConnection {
         val context = appContext ?: throw IllegalStateException("Android Context is required")
         ensurePermissions(context)
 
@@ -293,7 +313,7 @@ open class TouchBridgeClient(
             throw IOException("Bluetooth is disabled")
         }
 
-        val scanResult = scanForAgent(adapter, requestId)
+        val scanResult = scanForAgent(adapter, requestId, targetDeviceAddress)
         return try {
             connectGatt(context, scanResult.device, requestId)
         } catch (err: MissingGattSchemaException) {
@@ -307,14 +327,25 @@ open class TouchBridgeClient(
     private suspend fun scanForAgent(
         adapter: BluetoothAdapter,
         requestId: Long,
+        targetDeviceAddress: String? = null,
     ): ScanResult {
         val scanner = adapter.bluetoothLeScanner
             ?: throw IOException("BLE scanner is unavailable")
         val result = CompletableDeferred<ScanResult>()
+        val normalizedTargetAddress = targetDeviceAddress?.trim()?.takeIf { it.isNotBlank() }
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, scanResult: ScanResult) {
+                val address = scanResult.device.address
+                if (
+                    normalizedTargetAddress != null &&
+                    !address.equals(normalizedTargetAddress, ignoreCase = true)
+                ) {
+                    Log.d(TAG, "[$requestId] ignoring BLE agent $address; waiting for $normalizedTargetAddress")
+                    return
+                }
+
                 if (!result.isCompleted) {
-                    Log.d(TAG, "[$requestId] found BLE agent ${scanResult.device.address}")
+                    Log.d(TAG, "[$requestId] found BLE agent $address")
                     result.complete(scanResult)
                 }
             }
@@ -333,7 +364,14 @@ open class TouchBridgeClient(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        Log.d(TAG, "[$requestId] scanning for TouchBridge BLE service")
+        Log.d(
+            TAG,
+            if (normalizedTargetAddress == null) {
+                "[$requestId] scanning for TouchBridge BLE service"
+            } else {
+                "[$requestId] scanning for TouchBridge BLE service at $normalizedTargetAddress"
+            },
+        )
         scanner.startScan(listOf(filter), settings, callback)
 
         return try {
@@ -341,7 +379,12 @@ open class TouchBridgeClient(
                 result.await()
             }
         } catch (err: TimeoutCancellationException) {
-            throw IOException("TouchBridge BLE agent was not found", err)
+            val message = if (normalizedTargetAddress == null) {
+                "TouchBridge BLE agent was not found"
+            } else {
+                "TouchBridge BLE agent $normalizedTargetAddress was not found"
+            }
+            throw IOException(message, err)
         } finally {
             scanner.stopScan(callback)
         }
@@ -453,6 +496,7 @@ open class TouchBridgeClient(
                 result.complete(
                     ActiveConnection(
                         gatt = gatt,
+                        deviceAddress = device.address,
                         characteristic = characteristic,
                         supportsWriteWithoutResponse = supportsWriteWithoutResponse,
                         mtu = negotiatedMtu,
@@ -532,6 +576,7 @@ open class TouchBridgeClient(
 
     private data class ActiveConnection(
         val gatt: BluetoothGatt,
+        val deviceAddress: String,
         val characteristic: BluetoothGattCharacteristic,
         val supportsWriteWithoutResponse: Boolean,
         var mtu: Int,
@@ -585,6 +630,3 @@ fun requiredBluetoothPermissions(): Array<String> {
     }
 }
 
-private object BluetoothStatusCodes {
-    const val SUCCESS = 0
-}

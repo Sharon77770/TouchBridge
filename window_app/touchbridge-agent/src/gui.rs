@@ -369,6 +369,9 @@ impl eframe::App for TouchBridgeGui {
                 ble_error,
                 usb_status,
                 usb_error,
+                internet_route_status,
+                internet_route_error,
+                usb_tether_route_guard_enabled,
             ) = {
                 let state = self.state.read().expect("app state poisoned");
                 (
@@ -379,6 +382,9 @@ impl eframe::App for TouchBridgeGui {
                     state.ble_error.clone(),
                     state.usb_status.clone(),
                     state.usb_error.clone(),
+                    state.internet_route_status.clone(),
+                    state.internet_route_error.clone(),
+                    state.config.usb_tether_route_guard_enabled,
                 )
             };
 
@@ -392,6 +398,28 @@ impl eframe::App for TouchBridgeGui {
             ));
             ui.label(format!("BLE: {ble_status}"));
             ui.label(format!("USB: {usb_status}"));
+            ui.horizontal(|ui| {
+                let mut enabled = usb_tether_route_guard_enabled;
+                if ui
+                    .checkbox(
+                        &mut enabled,
+                        i18n::text(language, TextKey::UsbTetherRouteGuard),
+                    )
+                    .changed()
+                {
+                    let mut state = self.state.write().expect("app state poisoned");
+                    state.config.usb_tether_route_guard_enabled = enabled;
+                    self.save_status = i18n::text(language, TextKey::SettingsInMemory).to_string();
+                }
+            });
+            ui.label(i18n::text(
+                language,
+                TextKey::UsbTetherRouteGuardDescription,
+            ));
+            ui.label(format!(
+                "{}: {internet_route_status}",
+                i18n::text(language, TextKey::InternetRoute)
+            ));
             ui.label(format!(
                 "{}: {SERVICE_UUID_STRING}",
                 i18n::text(language, TextKey::ServiceUuid)
@@ -410,6 +438,10 @@ impl eframe::App for TouchBridgeGui {
             }
 
             if let Some(error) = usb_error {
+                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), error);
+            }
+
+            if let Some(error) = internet_route_error {
                 ui.colored_label(egui::Color32::from_rgb(190, 40, 40), error);
             }
 

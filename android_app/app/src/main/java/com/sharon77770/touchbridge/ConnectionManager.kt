@@ -27,6 +27,12 @@ class ConnectionManager(
 
     suspend fun connectToDevice(device: Device): Result<Unit> {
         val transport = transportFor(device.transport)
+        if (activeTransport != null && (activeDevice?.id != device.id || activeTransport !== transport)) {
+            activeTransport?.disconnect()
+            activeTransport = null
+            activeDevice = null
+        }
+
         return transport.connect(device).onSuccess {
             activeDevice = device
             activeTransport = transport
@@ -100,7 +106,7 @@ class BleTransport(
     }
 
     override suspend fun connect(device: Device): Result<Unit> {
-        return client.connectToAgent()
+        return client.connectToAgent(device.bleAddressOrNull())
     }
 
     override suspend fun sendGestureEvent(event: GestureEvent): Result<ProtocolAck> {

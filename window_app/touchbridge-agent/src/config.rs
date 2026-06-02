@@ -21,6 +21,8 @@ pub struct AppState {
     pub ble_error: Option<String>,
     pub usb_status: String,
     pub usb_error: Option<String>,
+    pub internet_route_status: String,
+    pub internet_route_error: Option<String>,
 }
 
 impl AppState {
@@ -37,6 +39,8 @@ impl AppState {
             ble_error: None,
             usb_status: i18n::text(language, TextKey::UsbServiceNotStarted).to_string(),
             usb_error: None,
+            internet_route_status: i18n::text(language, TextKey::RouteGuardNotChecked).to_string(),
+            internet_route_error: None,
         }
     }
 }
@@ -49,6 +53,8 @@ pub struct AppConfig {
     pub mappings: Vec<GestureMapping>,
     #[serde(default)]
     pub custom_buttons: Vec<CustomButtonMapping>,
+    #[serde(default = "default_usb_tether_route_guard_enabled")]
+    pub usb_tether_route_guard_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,8 +77,13 @@ impl Default for AppConfig {
             language: AppLanguage::default(),
             mappings: default_mappings(),
             custom_buttons: Vec::new(),
+            usb_tether_route_guard_enabled: default_usb_tether_route_guard_enabled(),
         }
     }
+}
+
+fn default_usb_tether_route_guard_enabled() -> bool {
+    true
 }
 
 fn default_mappings() -> Vec<GestureMapping> {

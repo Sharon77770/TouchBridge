@@ -9,6 +9,7 @@ mod gui;
 mod i18n;
 mod input;
 mod instance;
+mod network_guard;
 mod protocol;
 mod tray;
 mod usb;
@@ -38,6 +39,7 @@ fn main() -> eframe::Result<()> {
 
     start_ble_thread(state.clone());
     start_usb_thread(state.clone());
+    start_network_guard_thread(state.clone());
     let tray = tray::TrayHandle::start(language);
 
     let options = eframe::NativeOptions {
@@ -86,5 +88,11 @@ fn start_usb_thread(state: config::SharedAppState) {
             state.usb_status = usb_service_stopped(state.config.language).to_string();
             state.usb_error = Some(err.to_string());
         }
+    });
+}
+
+fn start_network_guard_thread(state: config::SharedAppState) {
+    thread::spawn(move || {
+        network_guard::run(state);
     });
 }

@@ -30,6 +30,14 @@ const AOA_CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 const E_FAIL: HRESULT = HRESULT(0x80004005u32 as i32);
 const USB_TCP_PORT: u16 = 47831;
 const USB_TCP_BEACON_PORT: u16 = 47832;
+const USB_TCP_BEACON_BROADCASTS: [&str; 6] = [
+    "255.255.255.255",
+    "192.168.42.255",
+    "192.168.43.255",
+    "192.168.44.255",
+    "192.168.137.255",
+    "172.20.255.255",
+];
 const ANDROID_VENDOR_IDS: [u32; 16] = [
     0x04E8, // Samsung
     0x05C6, // Qualcomm reference / several Android devices
@@ -169,9 +177,11 @@ async fn run_tcp_beacon() -> Result<()> {
     println!("USB cable network beacon started on UDP port {USB_TCP_BEACON_PORT}");
 
     loop {
-        let _ = socket
-            .send_to(payload.as_bytes(), ("255.255.255.255", USB_TCP_BEACON_PORT))
-            .await;
+        for address in USB_TCP_BEACON_BROADCASTS {
+            let _ = socket
+                .send_to(payload.as_bytes(), (address, USB_TCP_BEACON_PORT))
+                .await;
+        }
         time::sleep(Duration::from_secs(1)).await;
     }
 }

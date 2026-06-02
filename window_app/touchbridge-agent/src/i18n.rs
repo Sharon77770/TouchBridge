@@ -63,8 +63,12 @@ pub enum TextKey {
     ActionContent,
     PythonScriptAction,
     PowerShellScriptAction,
+    UsbTetherRouteGuard,
+    UsbTetherRouteGuardDescription,
+    InternetRoute,
     OpenTouchBridge,
     Exit,
+    RouteGuardNotChecked,
 }
 
 pub fn text(language: AppLanguage, key: TextKey) -> &'static str {
@@ -100,8 +104,14 @@ pub fn text(language: AppLanguage, key: TextKey) -> &'static str {
             TextKey::ActionContent => "Action",
             TextKey::PythonScriptAction => "Python code",
             TextKey::PowerShellScriptAction => "PowerShell script",
+            TextKey::UsbTetherRouteGuard => "Protect USB tethering for remote control only",
+            TextKey::UsbTetherRouteGuardDescription => {
+                "Keep Wi-Fi/Ethernet as the Windows internet path; only raise USB tethering metric."
+            }
+            TextKey::InternetRoute => "Internet route",
             TextKey::OpenTouchBridge => "Open TouchBridge",
             TextKey::Exit => "Exit",
+            TextKey::RouteGuardNotChecked => "USB tethering route guard has not checked yet",
         },
         AppLanguage::Korean => match key {
             TextKey::SettingsInMemory => "설정이 메모리에 적용됨",
@@ -134,8 +144,14 @@ pub fn text(language: AppLanguage, key: TextKey) -> &'static str {
             TextKey::ActionContent => "동작 내용",
             TextKey::PythonScriptAction => "Python 코드",
             TextKey::PowerShellScriptAction => "PowerShell 스크립트",
+            TextKey::UsbTetherRouteGuard => "USB 테더링을 원격 조작 전용으로 보호",
+            TextKey::UsbTetherRouteGuardDescription => {
+                "Windows 인터넷 경로는 Wi-Fi/Ethernet을 유지하고 USB 테더링 metric만 높입니다."
+            }
+            TextKey::InternetRoute => "인터넷 경로",
             TextKey::OpenTouchBridge => "TouchBridge 열기",
             TextKey::Exit => "종료",
+            TextKey::RouteGuardNotChecked => "USB 테더링 라우팅 보호를 아직 검사하지 않음",
         },
     }
 }
